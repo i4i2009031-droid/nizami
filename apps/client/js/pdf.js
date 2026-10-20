@@ -94,9 +94,9 @@ export async function makePdf({title,meta=[],columns=[],rows=[],footer='',brand=
 }
 function b64FromBytes(bytes){let s='';for(let i=0;i<bytes.length;i+=0x8000)s+=String.fromCharCode(...bytes.subarray(i,i+0x8000));return btoa(s);}
 export function downloadBlob(blob,filename){const a=document.createElement('a'),url=URL.createObjectURL(blob);a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000);}
-export async function sharePdf(blob,filename){
+export async function sharePdf(blob,filename,{text=""}={}){
  const plugins=window.Capacitor?.Plugins;
- if(plugins?.Filesystem&&plugins?.Share){const arr=new Uint8Array(await blob.arrayBuffer()),path='Qatfah/'+filename;await plugins.Filesystem.writeFile({path,data:b64FromBytes(arr),directory:'CACHE',recursive:true});const x=await plugins.Filesystem.getUri({path,directory:'CACHE'});await plugins.Share.share({title:filename,url:x.uri,dialogTitle:'مشاركة مستند قطفة'});return;}
- if(navigator.share&&navigator.canShare?.({files:[new File([blob],filename,{type:'application/pdf'})]})){await navigator.share({title:filename,files:[new File([blob],filename,{type:'application/pdf'})]});return;}
+ if(plugins?.Filesystem&&plugins?.Share){const arr=new Uint8Array(await blob.arrayBuffer()),path='Qatfah/'+filename;await plugins.Filesystem.writeFile({path,data:b64FromBytes(arr),directory:'CACHE',recursive:true});const x=await plugins.Filesystem.getUri({path,directory:'CACHE'});await plugins.Share.share({title:filename,text,url:x.uri,dialogTitle:'مشاركة مستند قطفة'});return;}
+ if(navigator.share&&navigator.canShare?.({files:[new File([blob],filename,{type:'application/pdf'})]})){await navigator.share({title:filename,text,files:[new File([blob],filename,{type:'application/pdf'})]});return;}
  downloadBlob(blob,filename);
 }
