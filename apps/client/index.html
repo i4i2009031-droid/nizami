@@ -1,1 +1,51 @@
-<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><meta name="theme-color" content="#075943"><title>قطفة | النظام المحاسبي</title><link rel="stylesheet" href="style.css"></head><body><main class="shell"><header><div class="brand">🌿 قطفة</div><div class="status"><span class="pill" id="clock">--:--</span><span class="pill" id="network">● غير متصل</span><span class="pill">واتساب: غير مرتبط</span></div></header><div class="welcome"><h1>أهلًا بك في قطفة</h1><p>دفتر حساباتك بالريال اليمني، معك في كل وقت</p><span id="storeName">محلي التجريبي</span></div><div class="metric-grid"><div class="metric">إجمالي المبيعات<b id="sales">٠ ر.ي</b></div><div class="metric">إجمالي المشتريات<b id="purchases">٠ ر.ي</b></div><div class="metric">الرصيد النقدي<b id="cash">٠ ر.ي</b></div></div><nav class="tiles" id="tiles"></nav><section class="panel hide" id="panel"></section><footer class="muted" style="text-align:center;padding:20px">نسخة أولية محلية • لا تستخدمها لعمليات حقيقية قبل تفعيل الخادم والنسخ الاحتياطي</footer></main><script src="app.js"></script></body></html>
+<!doctype html><html lang="ar" dir="rtl"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=5,viewport-fit=cover"/>
+<meta name="theme-color" content="#f6f8fc"/><meta name="description" content="قطفة: محاسبة تجار اليمن، أوفلاين وأونلاين" />
+<link rel="icon" href="./assets/icon-192.png"/><link rel="manifest" href="./manifest.webmanifest"/>
+<link rel="stylesheet" href="./app.css"/><title>قطفة | نظام المحاسبة</title>
+</head><body>
+<div id="toast" role="status" aria-live="polite"></div>
+<section id="login-screen" class="login-screen">
+ <div class="login-card">
+  <img class="login-logo" src="./assets/logo.png" alt="قطفة" />
+  <span class="kicker">نظام محاسبة التجار</span><h1>مرحبًا في قطفة</h1>
+  <p class="muted">فواتيرك، حساباتك، وتقاريرك... في مكان واحد</p>
+  <form id="login-form" class="stacked">
+    <label>اسم المستخدم <input name="username" autocomplete="username" placeholder="اسم المستخدم" required /></label>
+    <label>كلمة المرور <input name="password" type="password" autocomplete="current-password" placeholder="••••••••" required /></label>
+    <button type="submit" class="btn btn-primary">تسجيل الدخول <span>←</span></button>
+  </form>
+  <button id="demo-button" class="btn btn-light btn-block">الدخول للوضع المحلي التجريبي</button>
+  <details class="server-settings"><summary>إعداد رابط الخادم</summary><input id="login-api" type="url" placeholder="https://api.example.com" dir="ltr"/><button id="save-api-login" type="button" class="btn btn-light">حفظ عنوان الخادم</button></details>
+  <p class="foot-note">يتطلب تفعيل حساب جديد اتصالًا بالخادم. بعد تسجيل الدخول يمكن العمل دون إنترنت ضمن صلاحية الاشتراك.</p>
+ </div>
+</section>
+<div id="app-shell" class="app-shell" hidden>
+ <header class="app-header">
+  <div class="status-strip">
+    <span id="live-time" class="clock">--:--</span>
+    <div class="status-pills">
+      <span id="server-pill" class="status-pill"><i class="pulse"></i> أوفلاين</span>
+      <button id="wa-pill" class="status-pill" type="button"><i class="pulse wa"></i> واتساب غير مرتبط</button>
+    </div>
+  </div>
+  <div class="head-brand">
+    <div class="head-title"><img id="store-logo" src="./assets/icon-192.png" alt="شعار المحل"/><div><small class="hi">صباح الخير 👋</small><strong id="store-name">قطفة</strong><small id="store-subtitle">نظام حساباتك الذكي</small></div></div>
+    <button id="notifications-button" class="circle-button" type="button" title="المزامنة"><span id="sync-symbol">⟳</span></button>
+  </div>
+ </header>
+ <main class="main-content">
+   <section id="home-page" class="page"></section>
+   <section id="content-page" class="page" hidden></section>
+ </main>
+ <nav class="bottom-nav" aria-label="القائمة الرئيسية">
+   <button data-nav="home" class="active"><span>⌂</span>الرئيسية</button>
+   <button data-nav="invoices"><span>▦</span>الفواتير</button>
+   <button data-nav="parties"><span>♧</span>الحسابات</button>
+   <button data-nav="reports"><span>▤</span>التقارير</button>
+   <button data-nav="settings"><span>⚙</span>الإعدادات</button>
+ </nav>
+</div>
+<div id="sheet-backdrop" class="sheet-backdrop" hidden><section id="sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title"><div class="sheet-head"><button id="close-sheet" class="close-btn" type="button">×</button><h2 id="sheet-title"></h2><span class="sheet-grab"></span></div><div id="sheet-body" class="sheet-body"></div></section></div>
+<script type="module" src="./js/app.js"></script>
+</body></html>

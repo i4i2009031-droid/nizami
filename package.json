@@ -1,15 +1,22 @@
 {
-  "name": "qatfah-starter",
-  "version": "0.1.0",
+  "name": "qatfah-suite",
   "private": true,
-  "type": "module",
+  "version": "0.1.0",
+  "description": "Qatfah offline-first Yemeni accounting suite",
   "scripts": {
-    "build:client": "node scripts/prepare.mjs client",
-    "build:admin": "node scripts/prepare.mjs admin"
+    "build:web": "node scripts/build-web.mjs",
+    "build:client": "node scripts/build-web.mjs client",
+    "build:admin": "node scripts/build-web.mjs admin",
+    "test": "node --test tests/*.test.mjs",
+    "start:server": "node server/index.mjs"
   },
   "devDependencies": {
     "@capacitor/cli": "^7.4.4",
     "@capacitor/core": "^7.4.4",
-    "@capacitor/android": "^7.4.4"
-  }
+    "@capacitor/android": "^7.4.4",
+    "@capacitor/share": "^7.0.3",
+    "@capacitor/filesystem": "^7.1.4",
+    "@capacitor/browser": "^7.0.3"
+  },
+  "type": "module"
 }
