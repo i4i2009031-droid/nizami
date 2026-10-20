@@ -1,15 +1,15 @@
-name: Qatfah Android APK Build
+name: Qatfah Android APKs and Web (testing)
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:
 permissions:
   contents: write
 jobs:
   android:
-    name: APK ${{ matrix.app }}
+    name: Android ${{ matrix.app }} debug APK
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -28,26 +28,36 @@ jobs:
       - uses: android-actions/setup-android@v4
       - name: Install JavaScript dependencies
         run: npm install --no-audit --no-fund
-      - name: Check project source
+      - name: Restore official Qatfah PNG branding
+        run: node scripts/restore-assets.mjs
+      - name: Verify accounting and server modules
         run: |
-          node --check scripts/prepare.mjs
-          node --check apps/client/app.js
-          node --check apps/client/sw.js
-          node scripts/prepare.mjs ${{ matrix.app }}
-          test -s www/index.html
-          test -s capacitor.config.json
-          echo "WEB DIR:" && ls -la www/
-      - name: Generate Android project
+          node --check apps/client/js/app.js
+          node --check apps/client/js/ledger.js
+          node --check apps/client/js/pdf.js
+          node --check server/index.mjs
+          npm test
+      - name: Prepare web assets
+        env:
+          QATFAH_API_BASE: ${{ vars.QATFAH_API_BASE }}
         run: |
+          node scripts/build-web.mjs ${{ matrix.app }}
+          test -s dist/${{ matrix.app }}/index.html
+      - name: Prepare native Android
+        run: |
+          node scripts/prep-capacitor.mjs ${{ matrix.app }}
           npx cap add android
           npx cap sync android
-          test -f android/gradlew
-      - name: Build installable test APK
+      - name: Install native launcher icons
+        run: |
+          python3 -m pip install --quiet pillow
+          python3 scripts/android_assets.py ${{ matrix.app }}
+      - name: Build test APK
         run: |
           cd android
           chmod +x gradlew
           ./gradlew --no-daemon --stacktrace assembleDebug
-      - name: Verify and name APK
+      - name: Verify and name the output
         run: |
           test -s android/app/build/outputs/apk/debug/app-debug.apk
           cp android/app/build/outputs/apk/debug/app-debug.apk qatfah-${{ matrix.app }}.apk
@@ -57,34 +67,62 @@ jobs:
           name: qatfah-${{ matrix.app }}
           path: qatfah-${{ matrix.app }}.apk
           if-no-files-found: error
-      - name: Collect build diagnosis
+      - name: Build diagnostics
         if: failure()
         run: |
-          echo "Node version:" && node --version
-          echo "Java version:" && java -version
-          echo "npm tree:" && npm ls @capacitor/cli @capacitor/core @capacitor/android || true
-          echo "Config:" && cat capacitor.config.json || true
-          echo "Generated files:" && ls -la android/app/build/outputs/apk/debug || true
+          node --version
+          java -version
+          ls -lah android/app/build/outputs/apk/debug || true
   release:
-    needs: android
+    needs: [android]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v7
         with:
-          path: dist
+          path: release-files
           merge-multiple: true
-      - name: Verify both APKs
+      - name: Confirm both APKs exist
         run: |
-          test -s dist/qatfah-admin.apk
-          test -s dist/qatfah-client.apk
-          ls -lh dist/*.apk
-      - name: Publish APKs in Releases
+          test -s release-files/qatfah-client.apk
+          test -s release-files/qatfah-admin.apk
+          ls -lh release-files/*.apk
+      - name: Upload test APKs to GitHub Releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "qatfah-test-${{ github.run_number }}" dist/*.apk \
+          gh release create "qatfah-test-${{ github.run_number }}" release-files/*.apk \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Qatfah Test APKs - Build ${{ github.run_number }}" \
-            --notes "Android DEBUG APKs for testing only; not production-ready."
+            --title "Qatfah test APKs ${{ github.run_number }}" \
+            --notes "DEBUG APKs for internal evaluation, not production-signed or certified. Live Google OAuth and WhatsApp pairing require configured external services."
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Restore official Qatfah PNG branding
+        run: node scripts/restore-assets.mjs
+      - name: Prepare static websites
+        env:
+          QATFAH_API_BASE: ${{ vars.QATFAH_API_BASE }}
+        run: |
+          node scripts/build-web.mjs
+          mkdir -p site/admin
+          cp -a dist/client/. site/
+          cp -a dist/admin/. site/admin/
+          touch site/.nojekyll
+      - uses: actions/upload-artifact@v7
+        with:
+          name: qatfah-web
+          path: site
+      - name: Publish to GitHub Pages
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          publish_branch: gh-pages

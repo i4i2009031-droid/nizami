@@ -1,6 +1,11 @@
 node_modules/
-android/
-www/
 dist/
-.env
+android/
+.gradle/
+*.apk
 *.keystore
+server/data/
+.env
+.env.*
+!.env.example
+.DS_Store
