@@ -3,6 +3,8 @@ import {money,dateOnly,activeRecords,parties,itemsCatalog,currentSettings,statem
 import {makePdf,makeInvoicePdf,downloadBlob,sharePdf} from './pdf.js';
 import {buildPortableBackup,parsePortableBackup,backupFileName} from './backup.js';
 import {authenticate,readRegistry} from './subscription.js';
+import {createMoneyDesk} from './money-ui.js';
+import {accountBalances,financialPostings,fromMinor} from './money-services.js';
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const toast=message=>{const e=$('toast');e.textContent=message;e.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>e.classList.remove('show'),3300);};
@@ -30,7 +32,7 @@ const shortcuts=[
  ['sales','فاتورة مبيعات','sale','tile-green'],['purchases','فاتورة مشتريات','purchase','tile-blue'],['daily-sales','مبيعات يومية','daily','tile-cyan'],['cashbook','حركة الصندوق','cash','tile-violet'],
  ['customer','إضافة عميل','parties','tile-amber'],['supplier','إضافة مورد','suppliers','tile-cyan'],['items','الأصناف','items','tile-violet'],['receipts','سند قبض','receipt','tile-rose'],
  ['payments','سند صرف','payment','tile-indigo'],['expenses','مصروفات','expense','tile-orange'],['statements','كشف حساب','statement','tile-lime'],
- ['reports','التقارير','reports','tile-deep'],['whatsapp','واتساب','whatsapp','tile-green'],['backup','نسخ احتياطي','backup','tile-purple'],
+ ['reports','التقارير','reports','tile-deep'],['money-services','الصرافة والحوالات','cash','tile-indigo'],['whatsapp','واتساب','whatsapp','tile-green'],['backup','نسخ احتياطي','backup','tile-purple'],
  ['settings','الإعدادات','settings','tile-slate']
 ];
 function getParty(id){return parties(state.events).find(p=>p.id===id)||null;}
@@ -55,9 +57,9 @@ function setNetworkBadge(){
 async function record(type,payload){const e={id:crypto.randomUUID(),type,payload,at:new Date().toISOString(),synced:true};await putEvent(e);state.events=await allEvents();render();toast('تم حفظ العملية على الجهاز ✓');return e;}
 function render(){if(!state.session)return;const p=store();$('store-name').textContent=p.name||state.session.user.storeName||'قطفة';$('store-subtitle').textContent=state.session.mode==='demo'?'الوضع التجريبي المحلي':'دفتر حسابات المحل';$('store-logo').src=p.logo||'./assets/icon-192.png';setNetworkBadge();document.querySelectorAll('[data-nav]').forEach(x=>x.classList.toggle('active',x.dataset.nav===state.screen));$('home-page').hidden=state.screen!=='home';$('content-page').hidden=state.screen==='home';if(state.screen==='home')renderHome();else if(state.screen==='invoices')renderInvoices();else if(state.screen==='parties')renderParties();else if(state.screen==='reports')renderReports();else renderSettings();}
 function setScreen(page){state.screen=page;render();window.scrollTo({top:0,behavior:'smooth'});}
-function renderHome(){const s=summary(state.events),today=summary(state.events,localDate(),localDate());const recent=activeRecords(state.events).filter(e=>!['settings.update','party.add'].includes(e.type)).sort((a,b)=>b.at.localeCompare(a.at)).slice(0,5),people=parties(state.events);
+function renderHome(){const s=summary(state.events),cashYER=accountBalances(state.events).YER.cash,today=summary(state.events,localDate(),localDate());const recent=activeRecords(state.events).filter(e=>!['settings.update','party.add'].includes(e.type)).sort((a,b)=>b.at.localeCompare(a.at)).slice(0,5),people=parties(state.events);
  $('home-page').innerHTML=`
- <section class="balance-card"><small>صافي الحركة النقدية المسجلة</small><strong class="big-number">${money(s.cashMovement)}</strong>
+ <section class="balance-card"><small>رصيد صندوق الريال اليمني (يشمل الصرافة والحوالات)</small><strong class="big-number">${money(cashYER)}</strong>
  <div class="balance-sub"><div><small>مبيعات اليوم (يمني)</small><strong>${money(today.sales)}</strong></div><div><small>مشتريات اليوم (يمني)</small><strong>${money(today.purchases)}</strong></div></div></section><div class="currency-strip">${summaryByCurrency(state.events,localDate(),localDate()).map(x=>`<div><small>${x.currency}</small><strong>${money(x.sales,x.currency)}</strong></div>`).join('')}</div>
  <div class="section-title"><h2>الخدمات الرئيسية</h2><span class="chip">${shortcuts.length} خدمة</span></div>
  <div class="app-grid">${shortcuts.map(([action,title,ico,col])=>`<button class="app-tile" data-action="${action}"><span class="tile-icon ${col}">${svg(ico)}</span><b>${title}</b></button>`).join('')}</div>
@@ -252,12 +254,20 @@ function openMoney(kind='receipt',initialParty=''){
  $('money-form').onsubmit=async ev=>{ev.preventDefault();const f=new FormData(ev.target),currency=f.get('currency'),amount=rounded(f.get('amount'),currency);if(!CURRENCIES[currency]||amount<=0||amount>1e12||!Number.isFinite(amount))return toast('أدخل مبلغًا صحيحًا');await record(type,{partyId:f.get('partyId')||'',category:f.get('category')||'',notes:String(f.get('notes')||''),amount,currency});closeSheet();};
 }
 
+const openMoneyServices=createMoneyDesk({events:()=>state.events,record,showSheet:(...a)=>showSheet(...a),closeSheet:()=>closeSheet(),toast:(...a)=>toast(...a),store:()=>store(),makePdf,sharePdf});
 function openCashbook(){
- showSheet('حركة الصندوق',`<div class="hint">حدد العملة لعرض حركة الصندوق دون خلط الريال اليمني مع الدولار أو الريال السعودي.</div><label>عملة الصندوق<select id="cashbook-currency">${Object.entries(CURRENCIES).map(([k,c])=>`<option value="${k}" ${k===(store().currency||'YER')?'selected':''}>${esc(c.label)} (${k})</option>`).join('')}</select></label><div id="cashbook-contents"></div>`);
- const display=()=>{const currency=$('cashbook-currency').value,s=summary(state.events,'0000-01-01','9999-12-31',currency),list=activeRecords(state.events).filter(e=>['invoice.create','receipt.create','payment.create','expense.create'].includes(e.type)&&(e.payload.currency||'YER')===currency).sort((a,b)=>b.at.localeCompare(a.at)).slice(0,60);
- $('cashbook-contents').innerHTML=`<div class="summary-boxes"><div class="summary-box positive"><small>صافي النقدية</small><b>${money(s.cashMovement,currency)}</b></div><div class="summary-box"><small>المقبوضات (المبيعات النقدية والسندات)</small><b>${money(rounded(s.receipts+s.cashSales,currency),currency)}</b></div><div class="summary-box"><small>المدفوعات (المشتريات والسندات والمصروفات)</small><b>${money(rounded(s.payments+s.cashPurchases+s.expenses,currency),currency)}</b></div><div class="summary-box"><small>عدد العمليات</small><b>${s.count}</b></div></div><div class="list-card">${list.map(e=>{const d=describeEvent(e,parties(state.events));const paid=e.type==='invoice.create'?Number(e.payload.paid??(e.payload.payment==='cash'?e.payload.total:0)):Number(d.amount);const sign=e.type==='invoice.create'?(e.payload.kind==='purchase'?-1:1):['payment.create','expense.create'].includes(e.type)?-1:1;return `<div class="data-row"><div><b>${esc(d.title)}</b><small style="display:block;color:#8ca0a4">${dateOnly(e.at)} · ${esc(d.sub)}</small></div><strong>${money(rounded(sign*paid,currency),currency)}</strong></div>`;}).join('')||'<div class="empty">لا توجد عمليات بهذه العملة</div>'}</div>`;};
+ showSheet('حركة الصندوق',`<div class="hint">جميع المبيعات المسددة والسندات والصرف والحوالات وحركة الصندوق تدخل في النقدية بالعملة الصحيحة. لا تُخلط العملات ولا يُحسب رصيد البنك ضمن الصندوق.</div><label>عملة الصندوق<select id="cashbook-currency">${Object.entries(CURRENCIES).map(([k,c])=>`<option value="${k}" ${k===(store().currency||'YER')?'selected':''}>${esc(c.label)} (${k})</option>`).join('')}</select></label><div id="cashbook-contents"></div>`);
+ const display=()=>{
+  const currency=$('cashbook-currency').value,balances=accountBalances(state.events)[currency];
+  const journal=financialPostings(state.events).filter(x=>x.currency===currency&&x.account==='cash');
+  const group=new Map();for(const p of journal)group.set(p.eventId,(group.get(p.eventId)||0)+(p.side==='debit'?p.units:-p.units));
+  const income=[...group.values()].filter(x=>x>0).reduce((a,x)=>a+x,0),outgo=[...group.values()].filter(x=>x<0).reduce((a,x)=>a-x,0);
+  const list=activeRecords(state.events).filter(e=>group.has(e.id)).sort((a,b)=>b.at.localeCompare(a.at)).slice(0,70);
+  $('cashbook-contents').innerHTML=`<div class="summary-boxes"><div class="summary-box positive"><small>رصيد الصندوق</small><b>${money(balances.cash,currency)}</b></div><div class="summary-box"><small>مقبوضات وودائع</small><b>${money(fromMinor(income,currency),currency)}</b></div><div class="summary-box"><small>صرف نقدي وتحويلات للبنك</small><b>${money(fromMinor(outgo,currency),currency)}</b></div><div class="summary-box"><small>عدد الحركات المسجلة</small><b>${group.size}</b></div></div><div class="list-card">${list.map(e=>{const d=describeEvent(e,parties(state.events));const value=fromMinor(group.get(e.id),currency);return `<div class="data-row"><div><b>${esc(d.title)}</b><small style="display:block;color:#8ca0a4">${dateOnly(e.at)} · ${esc(d.sub)}</small></div><strong>${money(value,currency)}</strong></div>`;}).join('')||'<div class="empty">لا توجد حركات نقدية بهذه العملة</div>'}</div>`;
+ };
  $('cashbook-currency').onchange=display;display();
 }
+
 function openStatement(partyId=''){
  const currencies=Object.entries(CURRENCIES).map(([k,c])=>`<option value="${k}">${esc(c.label)} (${k})</option>`).join('');
  showSheet('كشف حساب تفصيلي',`<form id="statement-form" class="sheet-form"><label>العميل / المورد<select name="partyId" required><option value="">اختر الحساب</option>${partyOptions(partyId)}</select></label><label>عملة الحساب<select name="currency">${currencies}</select></label><div class="grid-two"><label>من تاريخ<input name="from" type="date" value="${localDate().slice(0,7)}-01" required/></label><label>إلى تاريخ<input name="to" type="date" value="${localDate()}" required/></label></div><button type="submit" class="btn btn-primary">عرض كشف الحساب</button></form><div id="statement-result"></div>`);
@@ -282,9 +292,17 @@ function openEvent(id){
 function fixWhatsappNumber(phone){let s=String(phone||'').replace(/\D/g,'');if(s.startsWith('00'))s=s.slice(2);if(s.startsWith('0')&&s.length===10)s='967'+s.slice(1);if(s.length===9&&s.startsWith('7'))s='967'+s;if(!/^\d{9,15}$/.test(s))throw Error('تأكد من رقم العميل في الحسابات، بصيغة +9677XXXXXXXX');return s;}
 async function sendPdfToWhatsapp(phone,blob,filename,caption=''){
  const number=fixWhatsappNumber(phone);
- if(!navigator.onLine)toast('يمكن تجهيز المستند أوفلاين، لكن إرساله عبر واتساب يحتاج إنترنت');
- await sharePdf(blob,filename,{text:`إلى العميل +${number} — ${caption}`});
- toast('اختر واتساب من قائمة المشاركة ثم حدّد محادثة العميل وأكّد الإرسال');
+ if(!navigator.onLine)toast('المستند جاهز أوفلاين؛ لن يصل حتى يتصل الهاتف بالإنترنت');
+ const native=window.Capacitor?.Plugins?.QatfahNative;
+ if(native?.sharePdfWhatsApp){
+   const bytes=new Uint8Array(await blob.arrayBuffer());
+   let raw='';for(let i=0;i<bytes.length;i+=32768)raw+=String.fromCharCode(...bytes.subarray(i,i+32768));
+   await native.sharePdfWhatsApp({base64:btoa(raw),filename,caption:`${caption} — رقم العميل +${number}`,phone:'+'+number});
+   toast('تُفتح المشاركة في واتساب الآن؛ اختر العميل وأكّد زر الإرسال');
+ } else {
+   await sharePdf(blob,filename,{text:`إلى العميل +${number} — ${caption}`});
+   toast('اختر واتساب من نافذة المشاركة ثم حدّد المحادثة وأكّد الإرسال');
+ }
 }
 async function shareWhatsapp(phone,text){
  let number;try{number=fixWhatsappNumber(phone);}catch(e){return toast(e.message)}
@@ -292,12 +310,10 @@ async function shareWhatsapp(phone,text){
  window.open(`https://wa.me/${number}?text=${encodeURIComponent(text)}`,'_blank','noopener,noreferrer');
 }
 function openWhatsapp(){
- showSheet('واتساب ويب داخل قطفة',`<p class="hint">اضغط فتح واتساب ويب؛ سيُعرض موقع web.whatsapp.com في نافذة أندرويد داخل التطبيق بوضع سطح المكتب. يظهر QR أو كود الاقتران فقط إن أتاحه واتساب. قد يمنع واتساب تشغيل الموقع داخل WebView؛ عندها استخدم المتصفح أو مشاركة PDF الأصلية.</p>
- <div class="foot-actions"><button id="wa-native" class="btn btn-primary">فتح واتساب ويب داخل التطبيق</button><button id="wa-browser" class="btn btn-light">فتح الموقع في المتصفح</button></div>
- <div class="hint">عند إرسال PDF اختر واتساب من قائمة مشاركة أندرويد ثم محادثة العميل؛ لا يستطيع قطفة تأكيد إرسال الملف دون موافقتك داخل واتساب. تُحفظ ملفات PDF محليًا دون خادم.</div>`);
- $('wa-native').onclick=async()=>{try{const p=window.Capacitor?.Plugins?.QatfahNative;if(!p?.openWhatsAppWeb)throw Error('ميزة واتساب ويب المدمجة متاحة في تطبيق Android فقط');await p.openWhatsAppWeb();}catch(e){toast(e.message)}};
- $('wa-browser').onclick=()=>window.open('https://web.whatsapp.com/','_blank','noopener,noreferrer');
+ showSheet('ربط واتساب في قطفة',`<div class="qr-box"><h3>ربط واتساب</h3><p class="hint">تظهر شاشة صغيرة للباركود أو رمز الهاتف وحالة الاتصال فقط، دون عرض صفحة المحادثات داخل قطفة. قد يمنع واتساب استخراج الرمز من WebView غير رسمي.</p><button type="button" id="wa-native" class="btn btn-primary">فتح شاشة QR / رمز الربط</button><p class="hint">عند إرسال PDF من الفواتير والكشوف، يُفتح تطبيق واتساب الأصلي لاختيار المستلم وتأكيد الإرسال؛ لا يملك قطفة واجهة رسمية للإرسال المخفي بلا تأكيد.</p></div>`);
+ $('wa-native').onclick=async()=>{try{const p=window.Capacitor?.Plugins?.QatfahNative;if(!p?.openWhatsAppWeb)throw Error('شاشة الربط المدمجة متاحة على Android فقط');await p.openWhatsAppWeb();}catch(e){toast(e.message)}};
 }
+
 async function resizeLogo(file){if(file.size>5e6)throw Error('الصورة كبيرة جدًا');const image=new Image(),url=URL.createObjectURL(file);try{image.src=url;await image.decode();const scale=Math.min(360/image.width,360/image.height,1),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(image.width*scale));canvas.height=Math.max(1,Math.round(image.height*scale));const ctx=canvas.getContext('2d');ctx.fillStyle='#ffffff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(image,0,0,canvas.width,canvas.height);return canvas.toDataURL('image/jpeg',.80);}finally{URL.revokeObjectURL(url);}}
 function openProfile(){
  const p=store();showSheet('هوية المحل في كل المستندات',`<form id="profile-form" class="sheet-form">
@@ -343,7 +359,7 @@ function openBackup(){
  $('backup-file').onchange=async e=>{try{if(e.target.files?.[0])await importPortableBackup(await e.target.files[0].text());}catch(err){toast(err.message)}};
 }
 function logout(force=false){if(!force&&!confirm('تسجيل الخروج؟ العمليات المحلية ستبقى على الجهاز.'))return;localStorage.removeItem('qatfah_session');state.session=null;state.events=[];$('app-shell').hidden=true;$('login-screen').hidden=false;closeSheet();}
-function action(id){if(!id)return;if(id==='sales')openInvoice('sale');else if(id==='purchases')openInvoice('purchase');else if(id==='customer')openParty('customer');else if(id==='supplier')openParty('supplier');else if(id==='receipts'||id.startsWith('receipts:'))openMoney('receipt',id.split(':')[1]||'');else if(id==='payments'||id.startsWith('payments:'))openMoney('payment',id.split(':')[1]||'');else if(id==='expenses')openMoney('expense');else if(id==='statements'||id.startsWith('statement:'))openStatement(id.split(':')[1]||'');else if(id==='cashbook')openCashbook();else if(id==='items')openItems();else if(id==='daily-sales')openDailySales();else if(id.startsWith('editparty:'))openParty(getParty(id.split(':')[1])?.type||'customer',id.split(':')[1]);else if(id==='reports'||id==='settings')setScreen(id);else if(id==='whatsapp')openWhatsapp();else if(id==='backup')openBackup();else if(id==='profile')openProfile();else if(id==='logout')logout();}
+function action(id){if(!id)return;if(id==='sales')openInvoice('sale');else if(id==='purchases')openInvoice('purchase');else if(id==='customer')openParty('customer');else if(id==='supplier')openParty('supplier');else if(id==='receipts'||id.startsWith('receipts:'))openMoney('receipt',id.split(':')[1]||'');else if(id==='payments'||id.startsWith('payments:'))openMoney('payment',id.split(':')[1]||'');else if(id==='expenses')openMoney('expense');else if(id==='statements'||id.startsWith('statement:'))openStatement(id.split(':')[1]||'');else if(id==='cashbook')openCashbook();else if(id==='money-services')openMoneyServices();else if(id==='items')openItems();else if(id==='daily-sales')openDailySales();else if(id.startsWith('editparty:'))openParty(getParty(id.split(':')[1])?.type||'customer',id.split(':')[1]);else if(id==='reports'||id==='settings')setScreen(id);else if(id==='whatsapp')openWhatsapp();else if(id==='backup')openBackup();else if(id==='profile')openProfile();else if(id==='logout')logout();}
 async function eventAction(cmd){const [name,id]=cmd.split(':');const e=activeRecords(state.events).find(x=>x.id===id);if(!e)return toast('العملية غير موجودة');if(name==='reverse'){if(!confirm('إلغاء هذه العملية؟ سيتم الاحتفاظ بأثر الإلغاء ولا يمكن حذفه من السجل.'))return;await record('event.reverse',{ref:id,notes:'إلغاء من شاشة الفواتير'});return;}openEvent(id);if(name==='pdf')$('detail-pdf').click();if(name==='share')$('detail-wa').click();}
 // Delegated handlers keep dynamic views functional after each render.
 document.addEventListener('click',e=>{const nav=e.target.closest('[data-nav]');if(nav){setScreen(nav.dataset.nav);return;}const open=e.target.closest('[data-nav-open]');if(open){setScreen(open.dataset.navOpen);return;}const event=e.target.closest('[data-event]');if(event){eventAction(event.dataset.event).catch(x=>toast(x.message));return;}const btn=e.target.closest('[data-action]');if(btn){action(btn.dataset.action);return;}});
