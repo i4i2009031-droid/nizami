@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths-ignore:
+      - users.json
   pull_request:
     branches: [main]
 permissions:
@@ -48,6 +50,8 @@ jobs:
           node scripts/prep-capacitor.mjs ${{ matrix.app }}
           npx cap add android
           npx cap sync android
+      - name: Install native Android document picker and WhatsApp Web screen
+        run: node scripts/inject-android.mjs ${{ matrix.app }}
       - name: Install native launcher icons
         run: |
           python3 -m pip install --quiet pillow
@@ -95,7 +99,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Qatfah test APKs ${{ github.run_number }}" \
-            --notes "DEBUG APKs for internal evaluation, not production-signed or certified. Live Google OAuth and WhatsApp pairing require configured external services."
+            --notes "DEBUG APKs for internal evaluation, not production-signed or certified. Local SAF backups and PDF share require no external developer services. WhatsApp Web embedding is best-effort and may be blocked by WhatsApp. GitHub admin write requires authorizing GitHub once."
   web:
     runs-on: ubuntu-24.04
     steps:

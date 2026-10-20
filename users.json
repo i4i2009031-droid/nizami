@@ -1,4 +1,5 @@
 {
-  "notice": "لا تحفظ بيانات أو كلمات مرور المشتركين في مستودع GitHub العام. حساباتهم واشتراكاتهم محفوظة في قاعدة SQLite الخاصة بخادم Qatfah API، وكلمات المرور مشتقة بملح مستقل باستخدام scrypt.",
+  "version": 2,
+  "notice": "Public pseudonymous subscription status only. No personal phones or plaintext passwords; access requires strong random 28-character passwords. Offline revocation is not instantaneous.",
   "subscribers": []
 }
