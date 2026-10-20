@@ -1,11 +1,13 @@
-import {setTenant,allEvents,putEvent,pendingEvents,markSynced,metaGet,metaPut,importEvents} from './storage.js';
+import {setTenant,allEvents,putEvent,importEvents} from './storage.js';
 import {money,dateOnly,activeRecords,parties,itemsCatalog,currentSettings,statement,summary,summaryByCurrency,groupedSummary,describeEvent,CURRENCIES,rounded} from './ledger.js';
 import {makePdf,makeInvoicePdf,downloadBlob,sharePdf} from './pdf.js';
+import {buildPortableBackup,parsePortableBackup,backupFileName} from './backup.js';
+import {authenticate,readRegistry} from './subscription.js';
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const toast=message=>{const e=$('toast');e.textContent=message;e.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>e.classList.remove('show'),3300);};
 const localDate=()=>dateOnly(new Date().toISOString());
-let state={session:null,events:[],screen:'home',apiBase:localStorage.getItem('qatfah_api_url')||'',waStatus:'unavailable',syncing:false,serverReachable:false};
+let state={session:null,events:[],screen:'home'};
 const icons={
  sale:'<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/>',
  purchase:'<path d="M3 5h2l2 11h11l3-8H7"/><circle cx="9" cy="20" r="1"/><circle cx="18" cy="20" r="1"/>',
@@ -31,39 +33,26 @@ const shortcuts=[
  ['reports','التقارير','reports','tile-deep'],['whatsapp','واتساب','whatsapp','tile-green'],['backup','نسخ احتياطي','backup','tile-purple'],
  ['settings','الإعدادات','settings','tile-slate']
 ];
-const API=()=>state.apiBase.replace(/\/$/,'');
-async function request(path,opts={}){if(!API())throw Error('لم يُضبط عنوان خادم قطفة');const resp=await fetch(API()+path,{...opts,headers:{'Content-Type':'application/json',...(state.session?.token?{Authorization:`Bearer ${state.session.token}`}:{}) ,...(opts.headers||{})},signal:AbortSignal.timeout(30000)});let data;try{data=await resp.json();}catch{throw Error('رد الخادم غير مفهوم');}if(!resp.ok)throw Error(data.message||`خطأ ${resp.status}`);return data;}
 function getParty(id){return parties(state.events).find(p=>p.id===id)||null;}
 function store(){return currentSettings(state.events);}
 function sessionValidOffline(s){return !!s&&!!s.user&&s.user.expiresAt>=localDate()&&(s.mode==='demo'||Date.now()-(s.lastChecked||0)<=7*86400000);}
 async function initial(){
- try{const conf=await fetch('./config.json',{cache:'no-store'}).then(r=>r.ok?r.json():null).catch(()=>null);if(!state.apiBase&&conf?.apiBase){state.apiBase=conf.apiBase;localStorage.setItem('qatfah_api_url',state.apiBase);}}catch{}
- $('login-api').value=state.apiBase;
  const saved=JSON.parse(localStorage.getItem('qatfah_session')||'null');
- if(sessionValidOffline(saved)){await activate(saved);if(navigator.onLine&&saved.mode!=='demo')refreshSession().catch(()=>{});}else{localStorage.removeItem('qatfah_session');$('login-screen').hidden=false;}
+ if(sessionValidOffline(saved)){await activate(saved);if(navigator.onLine&&saved.mode==='github')checkSubscription().catch(()=>{});}else{localStorage.removeItem('qatfah_session');$('login-screen').hidden=false;}
  updateClock();setInterval(updateClock,14000);
- window.addEventListener('online',()=>{setNetworkBadge();syncNow().catch(()=>{});checkWaStatus().catch(()=>{});});window.addEventListener('offline',setNetworkBadge);
+ window.addEventListener('online',()=>{setNetworkBadge();if(state.session?.mode==='github')checkSubscription().catch(()=>{});});window.addEventListener('offline',setNetworkBadge);
  if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
- setInterval(()=>{if(state.session?.mode!=='demo'&&navigator.onLine&&API()){pingServer().catch(()=>{});checkWaStatus().catch(()=>{});}},45000);
+ setInterval(()=>{if(state.session?.mode==='github'&&navigator.onLine)checkSubscription().catch(()=>{});},300000);
 }
-async function activate(session){state.session=session;setTenant(session.user.id||'demo');state.events=await allEvents();$('login-screen').hidden=true;$('app-shell').hidden=false;render();if(session.mode!=='demo'&&navigator.onLine){syncNow().catch(()=>{});checkWaStatus().catch(()=>{});} }
+async function activate(session){state.session=session;setTenant(session.user.id||'demo');state.events=await allEvents();$('login-screen').hidden=true;$('app-shell').hidden=false;render();if(session.mode==='github'&&navigator.onLine)checkSubscription().catch(()=>{}); }
 function persistSession(){localStorage.setItem('qatfah_session',JSON.stringify(state.session));}
-async function refreshSession(){const data=await request('/api/auth/me');state.session={...state.session,token:data.token,user:data.user,lastChecked:Date.now()};persistSession();render();}
+async function checkSubscription(){if(state.session?.mode!=='github'||!navigator.onLine)return;try{const users=await readRegistry(),account=users.find(x=>x.id===state.session.user.id);if(!account?.active||account.expiresAt<localDate()){toast('تم إيقاف اشتراكك أو انتهى؛ تواصل مع الإدارة');logout(true);return;}state.session.user.expiresAt=account.expiresAt;state.session.lastChecked=Date.now();persistSession();}catch(e){console.warn('Registry temporarily unavailable',e);}}
 function updateClock(){const d=new Date();$('live-time').textContent=d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',hour12:false});let hi=d.getHours()<12?'صباح الخير':'مساء الخير';document.querySelector('.hi').textContent=hi+' 👋';}
-async function pingServer(){if(!API()||!navigator.onLine)return;try{const r=await fetch(API()+'/api/health',{signal:AbortSignal.timeout(6000)});state.serverReachable=r.ok;}catch{state.serverReachable=false;}setNetworkBadge();}
-function setNetworkBadge(){const pill=$('server-pill');const online=navigator.onLine&&state.serverReachable&&state.session?.mode!=='demo';pill.classList.toggle('connected',online);pill.innerHTML=`<i class="pulse"></i> ${state.syncing?'تتم المزامنة':online?'الخادم متصل':'محفوظ محليًا'}`;const wa=$('wa-pill');wa.classList.toggle('connected',state.waStatus==='linked');wa.innerHTML=`<i class="pulse wa"></i> ${state.waStatus==='linked'?'واتساب متصل':state.waStatus==='connecting'||state.waStatus==='waiting_for_scan'?'واتساب قيد الربط':'واتساب غير مرتبط'}`;}
-let syncPromise=null;
-async function syncNow(){
- if(syncPromise)return syncPromise;
- if(!navigator.onLine||state.session?.mode==='demo'||!API())return;
- syncPromise=(async()=>{state.syncing=true;setNetworkBadge();try{
-  const outgoing=await pendingEvents();for(let i=0;i<outgoing.length;i+=80){const batch=outgoing.slice(i,i+80);const ack=await request('/api/sync/push',{method:'POST',body:JSON.stringify({events:batch})});await markSynced(ack.acceptedIds||[]);}
-  let cursor=await metaGet('cursor',0),loop=0;do{const reply=await request(`/api/sync/pull?after=${cursor}`);await importEvents(reply.events||[]);cursor=reply.cursor;await metaPut('cursor',cursor);if(!reply.hasMore)break;}while(++loop<30);
-  state.serverReachable=true;state.events=await allEvents();state.session.lastChecked=Date.now();persistSession();render();
- }catch(e){state.serverReachable=false;console.warn('Qatfah sync:',e);toast('العمليات محفوظة محليًا، ستتم المزامنة لاحقًا');}finally{state.syncing=false;setNetworkBadge();syncPromise=null;}})();return syncPromise;
+function setNetworkBadge(){
+ const pill=$('server-pill');pill.classList.remove('connected');pill.innerHTML='<i class="pulse"></i> الدفتر محفوظ على الجهاز';
+ $('wa-pill').classList.remove('connected');$('wa-pill').innerHTML='<i class="pulse wa"></i> فتح واتساب ويب';
 }
-async function checkWaStatus(){try{if(!API()||state.session?.mode==='demo')return;const r=await request('/api/whatsapp/status');state.waStatus=r.status;setNetworkBadge();}catch{state.waStatus='unavailable';setNetworkBadge();}}
-async function record(type,payload){const e={id:crypto.randomUUID(),type,payload,at:new Date().toISOString(),synced:state.session.mode==='demo'};await putEvent(e);state.events=await allEvents();render();toast('تم حفظ العملية على الجهاز ✓');if(state.session.mode!=='demo')syncNow().catch(()=>{});return e;}
+async function record(type,payload){const e={id:crypto.randomUUID(),type,payload,at:new Date().toISOString(),synced:true};await putEvent(e);state.events=await allEvents();render();toast('تم حفظ العملية على الجهاز ✓');return e;}
 function render(){if(!state.session)return;const p=store();$('store-name').textContent=p.name||state.session.user.storeName||'قطفة';$('store-subtitle').textContent=state.session.mode==='demo'?'الوضع التجريبي المحلي':'دفتر حسابات المحل';$('store-logo').src=p.logo||'./assets/icon-192.png';setNetworkBadge();document.querySelectorAll('[data-nav]').forEach(x=>x.classList.toggle('active',x.dataset.nav===state.screen));$('home-page').hidden=state.screen!=='home';$('content-page').hidden=state.screen==='home';if(state.screen==='home')renderHome();else if(state.screen==='invoices')renderInvoices();else if(state.screen==='parties')renderParties();else if(state.screen==='reports')renderReports();else renderSettings();}
 function setScreen(page){state.screen=page;render();window.scrollTo({top:0,behavior:'smooth'});}
 function renderHome(){const s=summary(state.events),today=summary(state.events,localDate(),localDate());const recent=activeRecords(state.events).filter(e=>!['settings.update','party.add'].includes(e.type)).sort((a,b)=>b.at.localeCompare(a.at)).slice(0,5),people=parties(state.events);
@@ -102,7 +91,7 @@ async function reportPdf(share){
  return share?sharePdf(blob,`Qatfah-report-${currency}.pdf`):downloadBlob(blob,`Qatfah-report-${currency}.pdf`);
 }
 
-function renderSettings(){const p=store();$('content-page').innerHTML=`<div class="content-header"><div><h2>الإعدادات</h2><small>هوية المحل والمزامنة والنسخ الاحتياطي</small></div></div><section class="flat-card"><div class="row"><img class="settings-avatar" src="${esc(p.logo||'./assets/icon-192.png')}" alt="شعار المحل"/><div><h3 style="margin-bottom:3px">${esc(p.name)}</h3><p class="muted" style="margin:0;font-size:11px">${esc(p.address||'اليمن')}</p></div></div><div class="setting-item"><span>تخصيص المحل والفواتير</span><button class="text-button" data-action="profile">تعديل ←</button></div><div class="setting-item"><span>سجل الأصناف والأسعار</span><button class="text-button" data-action="items">فتح ←</button></div><div class="setting-item"><span>النسخ الاحتياطي وGoogle Drive</span><button class="text-button" data-action="backup">فتح ←</button></div><div class="setting-item"><span>واتساب والربط</span><button class="text-button" data-action="whatsapp">الإدارة ←</button></div><div class="setting-item"><span>عنوان خادم المزامنة</span><button class="text-button" data-action="api">إعداد ←</button></div><div class="setting-item"><span>الحساب الحالي</span><small>${esc(state.session.user.username||'عرض تجريبي')}</small></div></section><button class="btn btn-danger btn-block" data-action="logout">تسجيل الخروج</button><div class="footer-warning">العمليات محفوظة محليًا على هذا الجهاز. لا تحذف بيانات التطبيق قبل رفع نسخة احتياطية مشفرة. النسخ المحلية لا تزامن تلقائيًا إلا بعد إعداد الخادم.</div>`;}
+function renderSettings(){const p=store();$('content-page').innerHTML=`<div class="content-header"><div><h2>الإعدادات</h2><small>هوية المحل والمزامنة والنسخ الاحتياطي</small></div></div><section class="flat-card"><div class="row"><img class="settings-avatar" src="${esc(p.logo||'./assets/icon-192.png')}" alt="شعار المحل"/><div><h3 style="margin-bottom:3px">${esc(p.name)}</h3><p class="muted" style="margin:0;font-size:11px">${esc(p.address||'اليمن')}</p></div></div><div class="setting-item"><span>تخصيص المحل والفواتير</span><button class="text-button" data-action="profile">تعديل ←</button></div><div class="setting-item"><span>سجل الأصناف والأسعار</span><button class="text-button" data-action="items">فتح ←</button></div><div class="setting-item"><span>النسخ الاحتياطي وGoogle Drive</span><button class="text-button" data-action="backup">فتح ←</button></div><div class="setting-item"><span>واتساب والربط</span><button class="text-button" data-action="whatsapp">الإدارة ←</button></div><div class="setting-item"><span>العمل محليًا دون خادم</span><small>مفعّل ✓</small></div><div class="setting-item"><span>الحساب الحالي</span><small>${esc(state.session.user.username||'عرض تجريبي')}</small></div></section><button class="btn btn-danger btn-block" data-action="logout">تسجيل الخروج</button><div class="footer-warning">العمليات محفوظة على هذا الجهاز. احفظ نسخة JSON عبر منتقي ملفات أندرويد بصورة دورية؛ النسخة غير مشفرة وقد تحتوي بيانات مالية خاصة.</div>`;}
 const showSheet=(title,html)=>{$('sheet').classList.remove('invoice-view');$('sheet-title').textContent=title;$('sheet-body').innerHTML=html;$('sheet-backdrop').hidden=false;document.body.style.overflow='hidden';};
 const closeSheet=()=>{$('sheet').classList.remove('invoice-view');$('sheet-backdrop').hidden=true;document.body.style.overflow='';$('sheet-body').innerHTML='';};
 const partyOptions=(chosen='')=>parties(state.events).map(p=>`<option value="${p.id}" ${p.id===chosen?'selected':''}>${esc(p.name)} (${p.type==='supplier'?'مورد':'عميل'})</option>`).join('');
@@ -205,7 +194,7 @@ function openInvoice(kind='sale',editId=''){
  <div class="invoice-grand"><div><small>إجمالي الفاتورة</small><strong id="invoice-total">${money(0,currency)}</strong></div><div><small>المتبقي (على الحساب)</small><strong id="invoice-outstanding">${money(0,currency)}</strong></div></div>
  <label>ملاحظات الفاتورة<textarea name="notes" maxlength="600" placeholder="اختياري">${esc(data.notes||'')}</textarea></label>
  <button class="btn btn-primary btn-block invoice-save" type="submit">▣ ${previous?'حفظ التصحيح':'حفظ الفاتورة دون انتظار الإنترنت'}</button>
- <small class="invoice-disclaimer">تُحفظ الفاتورة على الجهاز أولًا ثم تزامن عند توفر الخادم، مع الاحتفاظ بسجل التصحيحات.</small>
+ <small class="invoice-disclaimer">تُحفظ الفاتورة على الجهاز ويُحفظ سجل التصحيحات. للمزامنة اليدوية احفظ نسخة JSON إلى Drive واستعدها على جهاز آخر.</small>
  </form>`);
  $('sheet').classList.add('invoice-view');
  const entries=$('items-container');
@@ -293,26 +282,22 @@ function openEvent(id){
 function fixWhatsappNumber(phone){let s=String(phone||'').replace(/\D/g,'');if(s.startsWith('00'))s=s.slice(2);if(s.startsWith('0')&&s.length===10)s='967'+s.slice(1);if(s.length===9&&s.startsWith('7'))s='967'+s;if(!/^\d{9,15}$/.test(s))throw Error('تأكد من رقم العميل في الحسابات، بصيغة +9677XXXXXXXX');return s;}
 async function sendPdfToWhatsapp(phone,blob,filename,caption=''){
  const number=fixWhatsappNumber(phone);
- if(state.session.mode==='demo'||!API()||state.waStatus!=='linked'){
-  toast('واتساب ويب غير مرتبط. سيتم فتح مشاركة المستند بدل الإرسال التلقائي.');
-  return sharePdf(blob,filename);
- }
- if(!navigator.onLine)throw Error('الإرسال عبر واتساب يحتاج إنترنت، لكن المستندات محفوظة على الجهاز');
- if(blob.size>5_000_000)throw Error('المستند أكبر من الحد المسموح (5 MB)');
- const result=await request('/api/whatsapp/send-document',{method:'POST',body:JSON.stringify({phone:number,filename,caption,base64:base64(await blob.arrayBuffer())})});
- if(result.status!=='sent')throw Error(result.message||'تعذر إرسال PDF؛ راجع ربط واتساب');
- toast('تم إرسال ملف PDF إلى واتساب العميل ✓');
+ if(!navigator.onLine)toast('يمكن تجهيز المستند أوفلاين، لكن إرساله عبر واتساب يحتاج إنترنت');
+ await sharePdf(blob,filename,{text:`إلى العميل +${number} — ${caption}`});
+ toast('اختر واتساب من قائمة المشاركة ثم حدّد محادثة العميل وأكّد الإرسال');
 }
 async function shareWhatsapp(phone,text){
  let number;try{number=fixWhatsappNumber(phone);}catch(e){return toast(e.message)}
- if(state.waStatus==='linked'&&state.session.mode!=='demo'&&API()&&navigator.onLine){try{const r=await request('/api/whatsapp/send',{method:'POST',body:JSON.stringify({phone:number,text})});if(r.status==='sent')return toast('تم إرسال الرسالة إلى العميل ✓');throw Error('واتساب غير متصل');}catch(e){toast('تعذر الإرسال الآلي: '+e.message);}}
- if(!confirm('واتساب ويب غير مرتبط. هل تريد فتح واتساب لإرسال الرسالة يدويًا؟'))return;
+ if(!navigator.onLine)return toast('إرسال الرسالة يتطلب اتصالًا بالإنترنت');
  window.open(`https://wa.me/${number}?text=${encodeURIComponent(text)}`,'_blank','noopener,noreferrer');
 }
-
-function openWhatsapp(){showSheet('واتساب · إدارة الربط',`<p class="hint">لإرسال فاتورة أو سند استخدم زر واتساب داخل العملية (يعمل مباشرة). الربط التلقائي عبر QR أو كود الاقتران يحتاج خادم قطفة مع خدمة WhatsApp Web الاختيارية؛ هذه خدمة غير رسمية وقد تتوقف عند تحديث واتساب. لا يظهر رمز متصل إلا إذا أكد الخادم اتصال الجلسة.</p><div class="row-between"><h3>حالة الاتصال</h3><span class="chip" id="wa-state">جاري التحقق...</span></div><div class="qr-box" id="wa-qr">${state.session.mode==='demo'?'ربط واتساب غير متاح في الوضع التجريبي':'جاري تحميل معلومات الربط...'}</div><div class="sheet-form" style="margin-top:13px"><label>رقم واتساب للحصول على كود الاقتران<input id="wa-phone" type="tel" dir="ltr" placeholder="9677XXXXXXXX"/></label><button class="btn btn-light" id="wa-get-code">طلب كود الاقتران</button><div id="wa-pair-result" class="hint" aria-live="polite">سيظهر كود الاقتران هنا بعد طلبه.</div><button class="btn btn-primary" id="wa-check">تحديث حالة الاتصال</button></div>`);
- const update=async()=>{if(state.session.mode==='demo'||!API()){ $('wa-state').textContent='غير متاح';$('wa-qr').textContent='يتطلب خادمًا خاصًا وتفعيل خدمة ربط واتساب';return;}try{const r=await request('/api/whatsapp/qr');state.waStatus=r.status;$('wa-state').textContent=r.status==='linked'?'متصل ✓':r.status==='waiting_for_scan'?'امسح الكود من واتساب':r.status==='unavailable'?'الخدمة غير مفعلة':r.status==='connecting'?'جاري تهيئة الربط':r.status;$('wa-qr').innerHTML=r.image?`<img alt="رمز QR لربط واتساب" src="${esc(r.image)}"/>`:esc(r.message||'QR غير متاح حاليًا. راجع إعدادات الخادم.');setNetworkBadge();}catch(e){$('wa-state').textContent='تعذر الاتصال';$('wa-qr').textContent=e.message;}};
- $('wa-check').onclick=update;$('wa-get-code').onclick=async()=>{try{const phone=$('wa-phone').value.replace(/\D/g,'');const r=await request('/api/whatsapp/pair',{method:'POST',body:JSON.stringify({phone})});$('wa-pair-result').textContent=r.code?`رمز ربط واتساب: ${r.code} — أدخله داخل واتساب على الهاتف المرتبط`:(r.message||'تعذر استخراج الكود من الخدمة. تحقق من تشغيل الجسر على الخادم.');}catch(e){toast(e.message)}};update();}
+function openWhatsapp(){
+ showSheet('واتساب ويب داخل قطفة',`<p class="hint">اضغط فتح واتساب ويب؛ سيُعرض موقع web.whatsapp.com في نافذة أندرويد داخل التطبيق بوضع سطح المكتب. يظهر QR أو كود الاقتران فقط إن أتاحه واتساب. قد يمنع واتساب تشغيل الموقع داخل WebView؛ عندها استخدم المتصفح أو مشاركة PDF الأصلية.</p>
+ <div class="foot-actions"><button id="wa-native" class="btn btn-primary">فتح واتساب ويب داخل التطبيق</button><button id="wa-browser" class="btn btn-light">فتح الموقع في المتصفح</button></div>
+ <div class="hint">عند إرسال PDF اختر واتساب من قائمة مشاركة أندرويد ثم محادثة العميل؛ لا يستطيع قطفة تأكيد إرسال الملف دون موافقتك داخل واتساب. تُحفظ ملفات PDF محليًا دون خادم.</div>`);
+ $('wa-native').onclick=async()=>{try{const p=window.Capacitor?.Plugins?.QatfahNative;if(!p?.openWhatsAppWeb)throw Error('ميزة واتساب ويب المدمجة متاحة في تطبيق Android فقط');await p.openWhatsAppWeb();}catch(e){toast(e.message)}};
+ $('wa-browser').onclick=()=>window.open('https://web.whatsapp.com/','_blank','noopener,noreferrer');
+}
 async function resizeLogo(file){if(file.size>5e6)throw Error('الصورة كبيرة جدًا');const image=new Image(),url=URL.createObjectURL(file);try{image.src=url;await image.decode();const scale=Math.min(360/image.width,360/image.height,1),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(image.width*scale));canvas.height=Math.max(1,Math.round(image.height*scale));const ctx=canvas.getContext('2d');ctx.fillStyle='#ffffff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(image,0,0,canvas.width,canvas.height);return canvas.toDataURL('image/jpeg',.80);}finally{URL.revokeObjectURL(url);}}
 function openProfile(){
  const p=store();showSheet('هوية المحل في كل المستندات',`<form id="profile-form" class="sheet-form">
@@ -328,46 +313,48 @@ function openProfile(){
  $('profile-form').onsubmit=async ev=>{ev.preventDefault();const f=new FormData(ev.target),data={name:String(f.get('name')||'').trim(),address:String(f.get('address')||'').trim(),phone:String(f.get('phone')||'').trim(),email:String(f.get('email')||'').trim(),commercialId:String(f.get('commercialId')||'').trim(),currency:f.get('currency')};try{if($('logo-file').files[0])data.logo=await resizeLogo($('logo-file').files[0]);await record('settings.update',data);closeSheet();toast('تم تحديث هوية المحل في جميع المستندات');}catch(e){toast(e.message)}};
 }
 
-function openApiSettings(){showSheet('إعداد المزامنة',`<div class="hint">ضع الرابط العام الآمن HTTPS الخاص بـ Qatfah API. يتم الاحتفاظ به على جهازك فقط، وليس داخل GitHub.</div><form id="api-form" class="sheet-form"><label>رابط الخادم<input type="url" dir="ltr" name="url" value="${esc(state.apiBase)}" placeholder="https://api.your-domain.com" required /></label><button type="submit" class="btn btn-primary">حفظ الرابط</button></form>`);$('api-form').onsubmit=ev=>{ev.preventDefault();const link=String(new FormData(ev.target).get('url')).trim().replace(/\/$/,'');if(!link.startsWith('https://')&&!link.startsWith('http://localhost'))return toast('يجب استخدام HTTPS');state.apiBase=link;localStorage.setItem('qatfah_api_url',link);closeSheet();setNetworkBadge();syncNow().catch(()=>{});toast('تم تحديث رابط الخادم');};}
-function base64(buf){let b='';const bytes=new Uint8Array(buf);for(let i=0;i<bytes.length;i+=32768)b+=String.fromCharCode(...bytes.slice(i,i+32768));return btoa(b);}
-function decodeB64(s){const x=atob(s),a=new Uint8Array(x.length);for(let i=0;i<x.length;i++)a[i]=x.charCodeAt(i);return a;}
-async function exportEncrypted(password){if(password.length<8)throw Error('اختر كلمة مرور للنسخة الاحتياطية لا تقل عن 8 أحرف');const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));const keySeed=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveKey']);const key=await crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:180000,hash:'SHA-256'},keySeed,{name:'AES-GCM',length:256},false,['encrypt']);const plain=new TextEncoder().encode(JSON.stringify({format:'QatfahEncryptedBackup',version:1,tenant:state.session.user.id,createdAt:new Date().toISOString(),events:await allEvents()}));const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,plain);return new Blob([JSON.stringify({format:'QatfahBackupEnvelope',version:1,kdf:'PBKDF2-SHA256-180000',salt:base64(salt),iv:base64(iv),ciphertext:base64(cipher)})],{type:'application/octet-stream'});}
-async function restoreEncrypted(blob,password){const data=JSON.parse(await blob.text());if(data.format!=='QatfahBackupEnvelope')throw Error('ملف النسخة غير متوافق');const salt=decodeB64(data.salt),iv=decodeB64(data.iv),bytes=decodeB64(data.ciphertext),root=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveKey']),key=await crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:180000,hash:'SHA-256'},root,{name:'AES-GCM',length:256},false,['decrypt']);let output;try{output=JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv},key,bytes)));}catch{throw Error('كلمة المرور خاطئة أو الملف تالف');}if(output.format!=='QatfahEncryptedBackup'||!Array.isArray(output.events))throw Error('نسخة غير صالحة');if(output.tenant!==state.session.user.id)throw Error('هذه النسخة تخص حسابًا آخر؛ لا يمكن خلط بيانات المحلات');if(!confirm(`استيراد ${output.events.length} عملية للحساب الحالي؟ لن يتم حذف السجلات الموجودة.`))return;await importEvents(output.events.map(e=>({...e,synced:state.session.mode==='demo'})));state.events=await allEvents();render();toast('اكتملت استعادة النسخة');if(state.session.mode!=='demo')syncNow().catch(()=>{});}
-function openBackup(){
- const own=state.session.mode!=='demo'&&!!API();
- showSheet('المزامنة والنسخ الاحتياطي',`<p class="hint">بياناتك محفوظة على الجهاز، ويمكن حفظ نسخة مشفرة بكلمة مرور خاصة بك. تزامن المحلات يتم عبر الخادم، والنسخ الاحتياطي إلى Google Drive يحتاج موافقة صاحب الحساب.</p>
- <label>كلمة مرور النسخة المشفرة<input id="backup-secret" type="password" autocomplete="new-password" placeholder="8 أحرف على الأقل"/></label>
- <div class="foot-actions"><button id="backup-export" class="btn btn-primary">تنزيل نسخة محلية</button><button id="backup-restore" class="btn btn-light">استعادة من ملف</button></div><input id="backup-file" type="file" accept=".qtf,.json" hidden/>
- <div class="thin-divider" style="margin:18px 0"></div><h3>Google Drive — مجلد Qatfah_Backup</h3>
- <div class="hint">يتم إرسال نسخة مشفرة فقط. ربط الحساب عبر الخادم الآمن يدعم تطبيق أندرويد والويب بعد تفعيل Google OAuth على الخادم. لا يحتاج صاحب المحل إدخال كلمات مرور Google داخل قطفة.</div>
- <div class="row-between"><span id="drive-status-label" class="chip">جارٍ التحقق...</span><button class="btn btn-light" id="drive-status-refresh">تحديث الحالة</button></div>
- <div class="foot-actions"><button class="btn btn-light" id="drive-server-connect">ربط حساب Google</button><button class="btn btn-primary" id="drive-server-backup">رفع النسخة المشفرة</button></div>
- <button class="btn btn-light btn-block" id="drive-server-list">استعراض النسخ المحفوظة</button><div id="drive-files"></div>
- ${own?'':'<div class="hint">أنت في الوضع التجريبي أو دون خادم؛ يمكنك استخدام النسخ المحلية حتى إعداد الخادم.</div>'}`);
- $('backup-export').onclick=async()=>{try{const blob=await exportEncrypted($('backup-secret').value);downloadBlob(blob,`Qatfah_${localDate()}.qtf`);toast('تم إعداد النسخة المشفرة');}catch(e){toast(e.message)}};
- $('backup-restore').onclick=()=>$('backup-file').click();$('backup-file').onchange=async ev=>{try{if(ev.target.files[0])await restoreEncrypted(ev.target.files[0],$('backup-secret').value);}catch(e){toast(e.message)}};
- async function status(){if(!own){$('drive-status-label').textContent='يتطلب خادم قطفة';return;}try{const r=await request('/api/drive/status');$('drive-status-label').textContent=!r.configured?'يحتاج إعداد Google OAuth على الخادم':r.connected?'متصل بحساب Google ✓':'لم يُربط Google Drive بعد';$('drive-status-label').classList.toggle('orange',!r.connected);}catch(err){$('drive-status-label').textContent='الخادم غير متاح';}}
- $('drive-status-refresh').onclick=status;
- $('drive-server-connect').onclick=async()=>{if(!own)return toast('يرجى تسجيل الدخول عبر خادم قطفة');try{
-   const reply=await request('/api/drive/start',{method:'POST',body:'{}'});
-   if(window.Capacitor?.Plugins?.Browser)await window.Capacitor.Plugins.Browser.open({url:reply.url});else window.open(reply.url,'_blank','noopener,noreferrer');
-   toast('وافق على التفويض بحساب Google ثم عُد إلى قطفة لتحديث الحالة');
-  }catch(err){toast(err.message)};
- };
- $('drive-server-backup').onclick=async()=>{if(!own)return toast('الربط يحتاج خادمًا');try{const blob=await exportEncrypted($('backup-secret').value);const v=await request('/api/drive/upload',{method:'POST',body:JSON.stringify({encrypted:await blob.text(),filename:`Qatfah_${localDate()}.qtf`})});toast('تم حفظ النسخة المشفرة في Google Drive: '+v.name);}catch(err){toast(err.message)}};
- $('drive-server-list').onclick=async()=>{if(!own)return toast('الربط يحتاج خادمًا');try{const r=await request('/api/drive/backups');$('drive-files').innerHTML=r.files.map(x=>`<div class="data-row"><small>${esc(x.name)}</small><button class="action-link" data-drive-id="${esc(x.id)}">استعادة</button></div>`).join('')||'<p class="hint">لا توجد نسخ بعد</p>';document.querySelectorAll('[data-drive-id]').forEach(el=>el.onclick=async()=>{try{const result=await request('/api/drive/backups/'+encodeURIComponent(el.dataset.driveId));await restoreEncrypted(new Blob([result.encrypted]),$('backup-secret').value);}catch(e){toast(e.message)}});}catch(err){toast(err.message)}};
- status();
+async function savePortableBackup(){
+ const contents=JSON.stringify(buildPortableBackup(state.session.user.id,await allEvents()));
+ const filename=backupFileName();const plugin=window.Capacitor?.Plugins?.QatfahNative;
+ if(plugin?.saveJson){await plugin.saveJson({filename,content:contents});toast('حُفظت النسخة في الموقع الذي اخترته');return;}
+ const blob=new Blob([contents],{type:'application/json'});const file=new File([blob],filename,{type:'application/json'});
+ if(navigator.share&&navigator.canShare?.({files:[file]})){await navigator.share({files:[file],title:'نسخة قطفة الاحتياطية'});return;}
+ downloadBlob(blob,filename);toast('تم تنزيل نسخة JSON');
 }
-
-function logout(){if(!confirm('تسجيل الخروج؟ العمليات المحلية ستبقى على الجهاز.'))return;localStorage.removeItem('qatfah_session');state.session=null;state.events=[];$('app-shell').hidden=true;$('login-screen').hidden=false;closeSheet();}
-function action(id){if(!id)return;if(id==='sales')openInvoice('sale');else if(id==='purchases')openInvoice('purchase');else if(id==='customer')openParty('customer');else if(id==='supplier')openParty('supplier');else if(id==='receipts'||id.startsWith('receipts:'))openMoney('receipt',id.split(':')[1]||'');else if(id==='payments'||id.startsWith('payments:'))openMoney('payment',id.split(':')[1]||'');else if(id==='expenses')openMoney('expense');else if(id==='statements'||id.startsWith('statement:'))openStatement(id.split(':')[1]||'');else if(id==='cashbook')openCashbook();else if(id==='items')openItems();else if(id==='daily-sales')openDailySales();else if(id.startsWith('editparty:'))openParty(getParty(id.split(':')[1])?.type||'customer',id.split(':')[1]);else if(id==='reports'||id==='settings')setScreen(id);else if(id==='whatsapp')openWhatsapp();else if(id==='backup')openBackup();else if(id==='profile')openProfile();else if(id==='api')openApiSettings();else if(id==='logout')logout();}
+async function importPortableBackup(contents){
+ const data=parsePortableBackup(contents,state.session.user.id);
+ if(!confirm(`استعادة ${data.events.length} سجل؟ سيتم دمج السجلات دون حذف البيانات الموجودة.`))return;
+ await importEvents(data.events.map(x=>({...x,synced:true})));
+ state.events=await allEvents();render();toast('نجحت الاستعادة، وتوفرت الفواتير والعملاء والأصناف والشعار');
+}
+async function restorePortableBackup(){
+ const plugin=window.Capacitor?.Plugins?.QatfahNative;
+ if(plugin?.openJson){const r=await plugin.openJson();await importPortableBackup(r.content);return;}
+ $('backup-file').click();
+}
+function openBackup(){
+ showSheet('النسخ الاحتياطي عبر الهاتف',`<p class="hint">لا تحتاج إلى Google Cloud أو أي خادم. يحفظ أندرويد الملف في المكان الذي تختاره، بما فيه Google Drive إذا كان مثبتًا ومتصلًا بحسابك.</p>
+ <div class="foot-actions"><button class="btn btn-primary" id="backup-save">حفظ نسخة في Google Drive أو الهاتف</button><button class="btn btn-light" id="backup-open">استعادة ملف من Google Drive</button></div>
+ <input hidden type="file" accept="application/json,.json" id="backup-file" />
+ <div class="hint">يشمل الملف جميع السجلات والعملاء والموردين والأصناف والمبيعات وحسابات العملات الثلاث وهوية المحل وشعاره. ملف JSON غير مشفر؛ اختر حساب Drive خاصًا، ولا ترسله للآخرين.</div>
+ <div class="hint">للمزامنة بين جهازين، احفظ نسخة على الأول ثم استعدها على الآخر من نفس حساب التاجر. لا توجد مزامنة فورية أو تلقائية.</div>`);
+ $('backup-save').onclick=()=>savePortableBackup().catch(e=>toast(e.message));
+ $('backup-open').onclick=()=>restorePortableBackup().catch(e=>toast(e.message));
+ $('backup-file').onchange=async e=>{try{if(e.target.files?.[0])await importPortableBackup(await e.target.files[0].text());}catch(err){toast(err.message)}};
+}
+function logout(force=false){if(!force&&!confirm('تسجيل الخروج؟ العمليات المحلية ستبقى على الجهاز.'))return;localStorage.removeItem('qatfah_session');state.session=null;state.events=[];$('app-shell').hidden=true;$('login-screen').hidden=false;closeSheet();}
+function action(id){if(!id)return;if(id==='sales')openInvoice('sale');else if(id==='purchases')openInvoice('purchase');else if(id==='customer')openParty('customer');else if(id==='supplier')openParty('supplier');else if(id==='receipts'||id.startsWith('receipts:'))openMoney('receipt',id.split(':')[1]||'');else if(id==='payments'||id.startsWith('payments:'))openMoney('payment',id.split(':')[1]||'');else if(id==='expenses')openMoney('expense');else if(id==='statements'||id.startsWith('statement:'))openStatement(id.split(':')[1]||'');else if(id==='cashbook')openCashbook();else if(id==='items')openItems();else if(id==='daily-sales')openDailySales();else if(id.startsWith('editparty:'))openParty(getParty(id.split(':')[1])?.type||'customer',id.split(':')[1]);else if(id==='reports'||id==='settings')setScreen(id);else if(id==='whatsapp')openWhatsapp();else if(id==='backup')openBackup();else if(id==='profile')openProfile();else if(id==='logout')logout();}
 async function eventAction(cmd){const [name,id]=cmd.split(':');const e=activeRecords(state.events).find(x=>x.id===id);if(!e)return toast('العملية غير موجودة');if(name==='reverse'){if(!confirm('إلغاء هذه العملية؟ سيتم الاحتفاظ بأثر الإلغاء ولا يمكن حذفه من السجل.'))return;await record('event.reverse',{ref:id,notes:'إلغاء من شاشة الفواتير'});return;}openEvent(id);if(name==='pdf')$('detail-pdf').click();if(name==='share')$('detail-wa').click();}
 // Delegated handlers keep dynamic views functional after each render.
 document.addEventListener('click',e=>{const nav=e.target.closest('[data-nav]');if(nav){setScreen(nav.dataset.nav);return;}const open=e.target.closest('[data-nav-open]');if(open){setScreen(open.dataset.navOpen);return;}const event=e.target.closest('[data-event]');if(event){eventAction(event.dataset.event).catch(x=>toast(x.message));return;}const btn=e.target.closest('[data-action]');if(btn){action(btn.dataset.action);return;}});
-$('wa-pill').onclick=()=>state.session&&openWhatsapp();$('notifications-button').onclick=()=>syncNow().then(()=>toast('تمت مراجعة المزامنة'));
+$('wa-pill').onclick=()=>state.session&&openWhatsapp();$('notifications-button').onclick=()=>state.session?.mode==='github'?checkSubscription().then(()=>toast('تمت مراجعة حالة الاشتراك')):toast('البيانات محلية. احفظ نسخة احتياطية من قسم الإعدادات.');
 $('close-sheet').onclick=closeSheet;$('sheet-backdrop').onclick=ev=>{if(ev.target===$('sheet-backdrop'))closeSheet();};
-$('login-form').onsubmit=async ev=>{ev.preventDefault();const data=new FormData(ev.target);if(!API())return toast('أدخل رابط خادم قطفة في إعداد الخادم أولًا');const btn=ev.target.querySelector('button');btn.disabled=true;try{const r=await request('/api/auth/login',{method:'POST',body:JSON.stringify({username:data.get('username'),password:data.get('password')})});if(r.user.role!=='client')throw Error('هذا الدخول خاص بعملاء قطفة');const session={token:r.token,user:r.user,lastChecked:Date.now(),mode:'client'};persistSessionObject(session);await activate(session);}catch(e){toast(e.message);}finally{btn.disabled=false;}};
-function persistSessionObject(s){localStorage.setItem('qatfah_session',JSON.stringify(s));}
+$('login-form').onsubmit=async ev=>{ev.preventDefault();const f=new FormData(ev.target),button=ev.target.querySelector('button');button.disabled=true;
+ try {if(!navigator.onLine)throw Error('أول تسجيل دخول يحتاج إنترنت للتحقق من الاشتراك. بعدها يمكنك العمل دون إنترنت لمدة 7 أيام');
+ const user=await authenticate(f.get('username'),f.get('password'));
+ const session={token:null,mode:'github',user,lastChecked:Date.now()};persistSessionObject(session);await activate(session);
+ }catch(e){toast(e.message)}finally{button.disabled=false;}};
+
 $('demo-button').onclick=async()=>{const demo={mode:'demo',token:null,user:{id:'demo',username:'demo',storeName:'محل قطفة التجريبي',expiresAt:'2099-12-31'},lastChecked:Date.now()};persistSessionObject(demo);await activate(demo);};
-$('save-api-login').onclick=()=>{const url=$('login-api').value.trim().replace(/\/$/,'');if(!/^https:\/\//.test(url)&&!/^http:\/\/localhost(?::\d+)?$/.test(url))return toast('استخدم رابط HTTPS آمنًا');state.apiBase=url;localStorage.setItem('qatfah_api_url',url);toast('تم حفظ رابط الخادم');};
+
 initial().catch(e=>{console.error(e);toast('تعذر فتح قاعدة البيانات المحلية: '+e.message);});
