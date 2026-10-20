@@ -3,6 +3,7 @@ import {money,dateOnly,activeRecords,parties,itemsCatalog,currentSettings,statem
 import {makePdf,makeInvoicePdf,downloadBlob,sharePdf} from './pdf.js';
 import {buildPortableBackup,parsePortableBackup,backupFileName} from './backup.js';
 import {authenticate,readRegistry} from './subscription.js';
+import {persistSessionObject,readSessionObject,clearSessionObject} from './session.js';
 import {createMoneyDesk} from './money-ui.js';
 import {accountBalances,financialPostings,fromMinor} from './money-services.js';
 
@@ -39,15 +40,15 @@ function getParty(id){return parties(state.events).find(p=>p.id===id)||null;}
 function store(){return currentSettings(state.events);}
 function sessionValidOffline(s){return !!s&&!!s.user&&s.user.expiresAt>=localDate()&&(s.mode==='demo'||Date.now()-(s.lastChecked||0)<=7*86400000);}
 async function initial(){
- const saved=JSON.parse(localStorage.getItem('qatfah_session')||'null');
- if(sessionValidOffline(saved)){await activate(saved);if(navigator.onLine&&saved.mode==='github')checkSubscription().catch(()=>{});}else{localStorage.removeItem('qatfah_session');$('login-screen').hidden=false;}
+ const saved=readSessionObject();
+ if(sessionValidOffline(saved)){await activate(saved);if(navigator.onLine&&saved.mode==='github')checkSubscription().catch(()=>{});}else{clearSessionObject();$('login-screen').hidden=false;}
  updateClock();setInterval(updateClock,14000);
  window.addEventListener('online',()=>{setNetworkBadge();if(state.session?.mode==='github')checkSubscription().catch(()=>{});});window.addEventListener('offline',setNetworkBadge);
  if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
  setInterval(()=>{if(state.session?.mode==='github'&&navigator.onLine)checkSubscription().catch(()=>{});},300000);
 }
 async function activate(session){state.session=session;setTenant(session.user.id||'demo');state.events=await allEvents();$('login-screen').hidden=true;$('app-shell').hidden=false;render();if(session.mode==='github'&&navigator.onLine)checkSubscription().catch(()=>{}); }
-function persistSession(){localStorage.setItem('qatfah_session',JSON.stringify(state.session));}
+function persistSession(){if(state.session)persistSessionObject(state.session);}
 async function checkSubscription(){if(state.session?.mode!=='github'||!navigator.onLine)return;try{const users=await readRegistry(),account=users.find(x=>x.id===state.session.user.id);if(!account?.active||account.expiresAt<localDate()){toast('تم إيقاف اشتراكك أو انتهى؛ تواصل مع الإدارة');logout(true);return;}state.session.user.expiresAt=account.expiresAt;state.session.lastChecked=Date.now();persistSession();}catch(e){console.warn('Registry temporarily unavailable',e);}}
 function updateClock(){const d=new Date();$('live-time').textContent=d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',hour12:false});let hi=d.getHours()<12?'صباح الخير':'مساء الخير';document.querySelector('.hi').textContent=hi+' 👋';}
 function setNetworkBadge(){
@@ -358,7 +359,7 @@ function openBackup(){
  $('backup-open').onclick=()=>restorePortableBackup().catch(e=>toast(e.message));
  $('backup-file').onchange=async e=>{try{if(e.target.files?.[0])await importPortableBackup(await e.target.files[0].text());}catch(err){toast(err.message)}};
 }
-function logout(force=false){if(!force&&!confirm('تسجيل الخروج؟ العمليات المحلية ستبقى على الجهاز.'))return;localStorage.removeItem('qatfah_session');state.session=null;state.events=[];$('app-shell').hidden=true;$('login-screen').hidden=false;closeSheet();}
+function logout(force=false){if(!force&&!confirm('تسجيل الخروج؟ العمليات المحلية ستبقى على الجهاز.'))return;clearSessionObject();state.session=null;state.events=[];$('app-shell').hidden=true;$('login-screen').hidden=false;closeSheet();}
 function action(id){if(!id)return;if(id==='sales')openInvoice('sale');else if(id==='purchases')openInvoice('purchase');else if(id==='customer')openParty('customer');else if(id==='supplier')openParty('supplier');else if(id==='receipts'||id.startsWith('receipts:'))openMoney('receipt',id.split(':')[1]||'');else if(id==='payments'||id.startsWith('payments:'))openMoney('payment',id.split(':')[1]||'');else if(id==='expenses')openMoney('expense');else if(id==='statements'||id.startsWith('statement:'))openStatement(id.split(':')[1]||'');else if(id==='cashbook')openCashbook();else if(id==='money-services')openMoneyServices();else if(id==='items')openItems();else if(id==='daily-sales')openDailySales();else if(id.startsWith('editparty:'))openParty(getParty(id.split(':')[1])?.type||'customer',id.split(':')[1]);else if(id==='reports'||id==='settings')setScreen(id);else if(id==='whatsapp')openWhatsapp();else if(id==='backup')openBackup();else if(id==='profile')openProfile();else if(id==='logout')logout();}
 async function eventAction(cmd){const [name,id]=cmd.split(':');const e=activeRecords(state.events).find(x=>x.id===id);if(!e)return toast('العملية غير موجودة');if(name==='reverse'){if(!confirm('إلغاء هذه العملية؟ سيتم الاحتفاظ بأثر الإلغاء ولا يمكن حذفه من السجل.'))return;await record('event.reverse',{ref:id,notes:'إلغاء من شاشة الفواتير'});return;}openEvent(id);if(name==='pdf')$('detail-pdf').click();if(name==='share')$('detail-wa').click();}
 // Delegated handlers keep dynamic views functional after each render.
