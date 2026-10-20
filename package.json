@@ -1,0 +1,15 @@
+{
+  "name": "qatfah-starter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:client": "node scripts/prepare.mjs client",
+    "build:admin": "node scripts/prepare.mjs admin"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.4.4",
+    "@capacitor/core": "^7.4.4",
+    "@capacitor/android": "^7.4.4"
+  }
+}
