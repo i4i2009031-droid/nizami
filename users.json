@@ -1,5 +1,15 @@
 {
   "version": 2,
-  "notice": "Public pseudonymous subscription status only. No personal phones or plaintext passwords; access requires strong random 28-character passwords. Offline revocation is not instantaneous.",
-  "subscribers": []
+  "notice": "Public status registry; no phones or plaintext passwords",
+  "subscribers": [
+    {
+      "id": "c85ddab1-4de4-4071-bf75-b9ce557677e0",
+      "username": "ali",
+      "expiresAt": "2026-11-19",
+      "active": true,
+      "salt": "5f3349d35e8c6585563e069cb522efc7",
+      "rounds": 240000,
+      "passwordHash": "6d09ffdb5fe26c25335ee14c89ed7d01d5bd854dd452e5780363e665e0e69e87"
+    }
+  ]
 }
