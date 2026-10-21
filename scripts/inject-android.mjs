@@ -10,4 +10,4 @@ const manifest=path.resolve('android/app/src/main/AndroidManifest.xml');let xml=
 }
 const xmlDir=path.resolve('android/app/src/main/res/xml');fs.mkdirSync(xmlDir,{recursive:true});
 fs.writeFileSync(path.join(xmlDir,'qatfah_wa_paths.xml'),'<?xml version="1.0" encoding="utf-8"?><paths xmlns:android="http://schemas.android.com/apk/res/android"><cache-path name="wa-attachments" path="wa-attachments/"/></paths>');
-fs.writeFileSync(manifest,xml);console.log('Injected native Android backup document picker and WhatsApp Web activity');
+fs.copyFileSync(path.join(src,'whatsapp-direct.js'),path.resolve('android/app/src/main/assets/whatsapp-direct.js'));\nfs.writeFileSync(manifest,xml);console.log('Injected native Android backup document picker and WhatsApp Web activity');
