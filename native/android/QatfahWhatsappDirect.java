@@ -5,6 +5,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.FrameLayout;
 import android.webkit.CookieManager;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -47,7 +48,11 @@ public final class QatfahWhatsappDirect {
   CookieManager.getInstance().setAcceptThirdPartyCookies(web,true);
   web.setAlpha(0.01f);
   ViewGroup host=activity.findViewById(android.R.id.content);
-  host.addView(web,new ViewGroup.LayoutParams(1,1));
+  FrameLayout frame=new FrameLayout(activity);
+  frame.setClipChildren(true);frame.setClipToPadding(true);
+  FrameLayout.LayoutParams desktopSize=new FrameLayout.LayoutParams((int)(1100*activity.getResources().getDisplayMetrics().density),(int)(800*activity.getResources().getDisplayMetrics().density));
+  frame.addView(web,desktopSize);
+  host.addView(frame,new ViewGroup.LayoutParams(1,1));
   web.setWebViewClient(new WebViewClient(){
     @Override public void onPageFinished(WebView view,String url){
       if(!url.startsWith("https://web.whatsapp.com/"))return;
