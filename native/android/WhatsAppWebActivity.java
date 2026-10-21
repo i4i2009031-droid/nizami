@@ -21,6 +21,7 @@ import android.webkit.ValueCallback;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import java.io.File;
+import androidx.core.content.FileProvider;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -171,6 +172,14 @@ public final class WhatsAppWebActivity extends Activity {
                 if(fileCallback!=null)fileCallback.onReceiveValue(null);
                 fileCallback=callback;
                 try{
+                    if(!pdfPath.isEmpty()){
+                        File prepared=new File(pdfPath);
+                        File parent=new File(getCacheDir(),"wa-attachments").getCanonicalFile();
+                        if(prepared.getCanonicalFile().getParentFile().equals(parent)&&prepared.isFile()&&prepared.length()<=5_000_000){
+                            Uri uri=FileProvider.getUriForFile(WhatsAppWebActivity.this,getPackageName()+".waattachments",prepared);
+                            callback.onReceiveValue(new Uri[]{uri});fileCallback=null;pdfPath="";return true;
+                        }
+                    }
                     Intent picker=new Intent(Intent.ACTION_OPEN_DOCUMENT);
                     picker.addCategory(Intent.CATEGORY_OPENABLE);picker.setType("application/pdf");
                     startActivityForResult(picker,PICK_PDF);return true;
@@ -291,8 +300,8 @@ public final class WhatsAppWebActivity extends Activity {
         TextView notice=text("المحادثة داخل قطفة: أكد الإرسال بنفسك. لإرفاق PDF استخدم مشبك الملفات داخل واتساب.",12,0xff326353,false);
         controls.addView(notice,lp(-1,dp(46)));
         if(!pdfPath.isEmpty()){
-           TextView pdfNotice=button("ملف PDF جاهز • اختره عند ظهور منتقي المرفقات",()->{
-               new AlertDialog.Builder(this).setMessage("اضغط مشبك المرفقات داخل واتساب ثم اختر ملف PDF الذي جهزته قطفة. إذا تعذر رفعه داخل WebView فلا يمكن تأكيد الإرسال.").setPositiveButton("حسنًا",null).show();
+           TextView pdfNotice=button("ملف PDF جاهز • اضغط مشبك المرفقات داخل واتساب",()->{
+               new AlertDialog.Builder(this).setMessage("اضغط مشبك المرفقات داخل واتساب واختر مستند؛ سيقدم قطفة ملف PDF الجاهز إلى واتساب. راجع المعاينة واضغط إرسال بنفسك.").setPositiveButton("حسنًا",null).show();
            });
            controls.addView(pdfNotice,lp(-1,dp(50)));
         }
