@@ -137,7 +137,9 @@ public final class WhatsAppWebActivity extends Activity {
             qrPlaceholder.setVisibility(View.VISIBLE);
             qrPlaceholder.setText("يتم تحديث الباركود…");
             pairingCode.setText("رمز الربط\nلم يصدر واتساب رمزًا حتى الآن");
-            setStatus("جارٍ إعادة الاتصال",false);hiddenWeb.reload();
+            setStatus("جارٍ فحص حالة الربط",false);
+            if(reused){loaded=true;readPairingState();}
+            else hiddenWeb.reload();
         });
         TextView switchMode=button("الربط برقم الهاتف",()->{
             boolean open=phoneArea.getVisibility()!=View.VISIBLE;
@@ -161,7 +163,10 @@ public final class WhatsAppWebActivity extends Activity {
         root.addView(button("العودة إلى قطفة",this::finish),back);
         persistent=QatfahWhatsappDirect.getShared();
         if(persistent!=null){try{hiddenWeb=persistent.takeForLinking();reused=hiddenWeb!=null;}catch(Exception ignored){}}
-        if(hiddenWeb==null)hiddenWeb=new WebView(this);
+        if(hiddenWeb==null){
+            status.setText("تعذر الوصول إلى جلسة واتساب الحالية. عد إلى قطفة وأعد فتح القسم.");
+            setContentView(scroll);return;
+        }
         // Keep a desktop-sized layout engine alive without presenting its page.
         // A 1x1 WebView viewport prevented responsive WhatsApp from rendering its QR.
         hiddenWeb.setAlpha(0.01f);hiddenWeb.setVisibility(View.VISIBLE);
@@ -171,7 +176,7 @@ public final class WhatsAppWebActivity extends Activity {
         s.setUseWideViewPort(true);s.setLoadWithOverviewMode(true);s.setSupportMultipleWindows(false);
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(hiddenWeb,true);
-        hiddenWeb.setWebChromeClient(new WebChromeClient(){
+        if(!reused)hiddenWeb.setWebChromeClient(new WebChromeClient(){
             @Override public boolean onShowFileChooser(WebView view,ValueCallback<Uri[]> callback,FileChooserParams params){
                 if(fileCallback!=null)fileCallback.onReceiveValue(null);
                 fileCallback=callback;
@@ -190,7 +195,7 @@ public final class WhatsAppWebActivity extends Activity {
                 }catch(Exception e){fileCallback=null;callback.onReceiveValue(null);return true;}
             }
         });
-        hiddenWeb.setWebViewClient(new WebViewClient(){
+        if(!reused)hiddenWeb.setWebViewClient(new WebViewClient(){
             @Override public void onPageFinished(WebView view,String u){loaded=true;readPairingState();}
             @Override public boolean shouldOverrideUrlLoading(WebView w, WebResourceRequest r){
                 Uri u=r.getUrl();String host=u.getHost();
@@ -202,7 +207,7 @@ public final class WhatsAppWebActivity extends Activity {
         // viewport stays desktop sized so the login canvas can be rendered.
         webHost=new FrameLayout(this);
         webHost.setClipChildren(true);webHost.setClipToPadding(true);
-        webHost.addView(hiddenWeb,new FrameLayout.LayoutParams(dp(1150),dp(820)));
+        if(!reused)webHost.addView(hiddenWeb,new FrameLayout.LayoutParams(dp(1150),dp(820)));
         root.addView(webHost,lp(dp(1),dp(1)));
         setContentView(scroll);
         scroll.requestApplyInsets();
@@ -294,6 +299,7 @@ public final class WhatsAppWebActivity extends Activity {
     private void showChat(){
         if(hiddenWeb==null)return;
         if(chatVisible)return;
+        if(reused && (persistent==null||!persistent.detachForChat(hiddenWeb)))return;
         chatVisible=true;
         root.removeView(webHost);
         root.removeAllViews();
