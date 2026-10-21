@@ -56,3 +56,19 @@
 @media(min-width:680px){.invoice-view{height:min(900px,96dvh);max-height:96dvh;border-radius:24px}}
 @media(max-width:370px){.invoice-grand strong{font-size:15px}.currency-strip strong{font-size:10px}.item-fields{gap:5px}.invoice-heading>b{font-size:15px}}
 @media print{.bottom-nav,.app-header,.sheet-head,.sheet-backdrop,.btn,#toast{display:none!important}}
+
+
+/* WhatsApp gateway: strictly isolated, readable QR/phone/code/connected views. */
+.wa-gateway{display:grid;gap:13px;padding-bottom:12px;direction:rtl}
+.wa-gateway .wa-status-strip{background:#edf7f3;border:1px solid #cde8dc;color:#075d46;font-weight:800;border-radius:14px;padding:13px;text-align:center;font-size:13px}
+.wa-auth-view{background:white;border:1px solid #e1ece9;border-radius:17px;padding:16px;display:grid;gap:11px}
+.wa-auth-view[hidden],.wa-gateway [hidden]{display:none!important}
+.wa-qr-frame{width:min(100%,290px);min-height:250px;background:white;border:1px dashed #bdcec9;margin:0 auto;border-radius:15px;display:flex;justify-content:center;align-items:center;padding:12px;text-align:center;color:#69877e}
+.wa-qr-frame img{display:block;width:100%;height:auto;object-fit:contain;image-rendering:auto}
+.wa-qr-frame img[hidden]{display:none!important}
+.wa-country-phone{display:flex;align-items:center;gap:8px;background:#f6f9f8;border:1px solid #d8e5e0;border-radius:12px;padding:4px 12px}
+.wa-country-phone b{color:#006b50}.wa-country-phone input{flex:1;min-width:0;direction:ltr;border:0!important;background:transparent!important;box-shadow:none!important}
+.wa-code-cells{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:4px;direction:ltr}
+.wa-code-cell{text-align:center;font-size:19px;font-weight:900;border-radius:10px;background:#eff8f4;border:1px solid #c9e6da;color:#006f54;padding:10px 0}
+.wa-connected-mark{text-align:center;background:#e5f7ed;color:#006742;padding:15px;border-radius:13px;font-weight:900}
+.wa-caution{font-size:11px;line-height:1.8;color:#687e7a;margin:0}
