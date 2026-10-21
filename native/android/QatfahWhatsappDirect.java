@@ -55,14 +55,20 @@ public final class QatfahWhatsappDirect {
   CookieManager.getInstance().setAcceptCookie(true);
   CookieManager.getInstance().setAcceptThirdPartyCookies(web,true);
   web.setAlpha(0.01f);
+  web.setVisibility(View.VISIBLE);
   ViewGroup host=activity.findViewById(android.R.id.content);
   parkedFrame=new FrameLayout(activity);
   parkedFrame.setClipChildren(true);parkedFrame.setClipToPadding(true);
   FrameLayout.LayoutParams desktopSize=new FrameLayout.LayoutParams((int)(1100*activity.getResources().getDisplayMetrics().density),(int)(800*activity.getResources().getDisplayMetrics().density));
   parkedFrame.addView(web,desktopSize);
-  host.addView(parkedFrame,new ViewGroup.LayoutParams(1,1));
+  FrameLayout.LayoutParams params=new FrameLayout.LayoutParams(2,2,android.view.Gravity.BOTTOM|android.view.Gravity.RIGHT);
+  host.addView(parkedFrame,params);
   installWebClient();
   web.loadUrl("https://web.whatsapp.com/");
+  handler.postDelayed(new Runnable(){@Override public void run(){
+   if(web!=null&&pending==null&&!inLinkScreen)web.evaluateJavascript("document.readyState",null);
+   handler.postDelayed(this,5000);
+  }},5000);
  }
  private void installWebClient(){
   web.setWebViewClient(new WebViewClient(){
