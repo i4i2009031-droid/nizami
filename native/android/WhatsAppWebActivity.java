@@ -55,7 +55,7 @@ public final class WhatsAppWebActivity extends Activity {
     private ValueCallback<Uri[]> fileCallback;
     private static final int PICK_PDF=9205;
     private final Handler handler=new Handler(Looper.getMainLooper());
-    private boolean closing=false,loaded=false,seenQr=false,pairingRequested=false;
+    private boolean closing=false,loaded=false,seenQr=false,pairingRequested=false,linkedBefore=false;
     private final Runnable probe=new Runnable(){ @Override public void run(){
         if(closing||hiddenWeb==null)return;
         if(loaded)readPairingState();
@@ -235,10 +235,16 @@ public final class WhatsAppWebActivity extends Activity {
                 if(value.startsWith("\""))unwrapped=(String)new org.json.JSONTokener(value).nextValue();
                 JSONObject obj=new JSONObject(unwrapped);
                 if(obj.optBoolean("connected")){
-                    setStatus("متصل بهذه الجلسة في الوقت الحالي",true);
-                    hint.setText("واتساب مرتبط. افتح المحادثات من الزر أدناه واستخدم زر إرسال واتساب نفسه.");
+                    linkedBefore=true;
+                    seenQr=false;
+                    setStatus("واتساب متصل بجميع أقسام قطفة",true);
+                    hint.setText("الجلسة تعمل داخل قطفة طوال بقاء التطبيق نشطًا. يمكنك الرجوع للفواتير والسندات.");
+                    qr.setImageDrawable(null);
+                    qrPlaceholder.setText("واتساب متصل. لا تحتاج إلى باركود جديد.");
+                    qrPlaceholder.setVisibility(View.VISIBLE);
+                    pairingCode.setText("متصل وجاهز للإرسال");
                     if(!targetPhone.isEmpty())showChat();
-                    qr.setImageDrawable(null);pairingCode.setText("تم الربط");return;
+                    return;
                 }
                 String image=obj.optString("qr","");
                 if(image.startsWith("data:image/png;base64,")&&image.length()<500_000){
@@ -249,7 +255,17 @@ public final class WhatsAppWebActivity extends Activity {
                 }
                 String code=obj.optString("code","");
                 if(!code.isEmpty())pairingCode.setText("رمز الربط: "+code);
-                if(!seenQr&&!obj.optBoolean("connected"))setStatus("غير متصل • انتظار الرمز",false);
+                if(!seenQr){
+                    if(linkedBefore){
+                        status.setText("🟠 جارٍ التحقق من الاتصال الحالي...");
+                        status.setTextColor(0xff996920);
+                        qrPlaceholder.setText("يتم فحص جلسة واتساب السابقة. لا يلزم ربط جديد إلا إذا ظهر QR فعليًا.");
+                        qrPlaceholder.setVisibility(View.VISIBLE);
+                    }else{
+                        status.setText("🟠 انتظار تحميل رمز الربط");
+                        status.setTextColor(0xff996920);
+                    }
+                }
             }catch(Exception e){hint.setText("تعذر قراءة الرمز من نسخة واتساب الحالية. يمكنك استخدام الربط الخارجي.");}
         });
     }
