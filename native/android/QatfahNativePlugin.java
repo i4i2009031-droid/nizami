@@ -30,6 +30,18 @@ public class QatfahNativePlugin extends Plugin {
     if(direct==null){JSObject out=new JSObject();out.put("status","not_started");call.resolve(out);return;}
     direct.getConnectionStatus(call);
   }
+  @PluginMethod public void whatsappShowBrowser(PluginCall call){
+    if(direct==null)direct=new QatfahWhatsappDirect(getActivity());
+    direct.showPairingPage(call);
+  }
+  @PluginMethod public void whatsappHideBrowser(PluginCall call){
+    if(direct==null){call.resolve();return;}
+    direct.hidePairingPage(call);
+  }
+  @PluginMethod public void whatsappRetryBrowser(PluginCall call){
+    if(direct==null)direct=new QatfahWhatsappDirect(getActivity());
+    direct.retryLoading(call);
+  }
   @PluginMethod public void whatsappPairingStatus(PluginCall call){
     if(direct==null)direct=new QatfahWhatsappDirect(getActivity());
     direct.pairingStatus(call);
