@@ -1,8 +1,14 @@
 /** Pure, deterministic accounting projections. Never combine different currencies. */
-export const CURRENCIES={YER:{label:'الريال اليمني',symbol:'ر.ي',digits:0},USD:{label:'الدولار الأمريكي',symbol:'USD',digits:2},SAR:{label:'الريال السعودي',symbol:'ر.س',digits:2}};
+export const CURRENCIES={YER:{label:'الريال اليمني',symbol:'ر.ي',digits:0},USD:{label:'الدولار الأمريكي',symbol:'$',digits:2},SAR:{label:'الريال السعودي',symbol:'ر.س',digits:2}};
 export const currencyOf=p=>CURRENCIES[p?.currency]?p.currency:'YER';
 export const rounded=(value,currency='YER')=>{const digits=CURRENCIES[currency]?.digits??0;const f=10**digits;return Math.round((Number(value)+Number.EPSILON)*f)/f;};
 export function money(n,currency='YER'){const c=CURRENCIES[currency]||CURRENCIES.YER;return `${new Intl.NumberFormat('en-US',{minimumFractionDigits:c.digits,maximumFractionDigits:c.digits}).format(Number(n)||0)} ${c.symbol}`;}
+/** A customer's debit is owed to the shop; credit is owed to the customer. */
+export function balanceDescription(value,currency='YER'){
+ const balance=rounded(value,currency);
+ if(!Number.isFinite(balance))throw new Error('رصيد غير صالح');
+ return {side:balance>0?'debit':balance<0?'credit':'settled',label:balance>0?'عليه / مطلوب من العميل':balance<0?'له / مستحق للعميل':'خالص',amount:Math.abs(balance)};
+}
 /** Business dates use Yemen local time (UTC+3), not UTC calendar days. */
 const arabiaDate=new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Aden',year:'numeric',month:'2-digit',day:'2-digit'});
 export const dateOnly=dt=>{const str=String(dt||'');if(!str.includes('T'))return str.slice(0,10);const d=new Date(str);if(Number.isNaN(d.getTime()))return str.slice(0,10);const parts=Object.fromEntries(arabiaDate.formatToParts(d).map(x=>[x.type,x.value]));return `${parts.year}-${parts.month}-${parts.day}`;};
