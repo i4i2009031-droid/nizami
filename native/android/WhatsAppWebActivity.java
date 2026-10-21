@@ -42,6 +42,8 @@ public final class WhatsAppWebActivity extends Activity {
     private static final String URL="https://web.whatsapp.com/";
     private static final String UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
     private WebView hiddenWeb;
+    private QatfahWhatsappDirect persistent;
+    private boolean reused;
     private TextView status, hint, pairingCode, qrPlaceholder;
     private ImageView qr;
     private EditText phoneInput;
@@ -157,7 +159,9 @@ public final class WhatsAppWebActivity extends Activity {
         LinearLayout.LayoutParams ex=lp(-1,dp(54));ex.topMargin=dp(14);root.addView(external,ex);
         LinearLayout.LayoutParams back=lp(-1,dp(50));back.topMargin=dp(8);
         root.addView(button("العودة إلى قطفة",this::finish),back);
-        hiddenWeb=new WebView(this);
+        persistent=QatfahWhatsappDirect.getShared();
+        if(persistent!=null){try{hiddenWeb=persistent.takeForLinking();reused=hiddenWeb!=null;}catch(Exception ignored){}}
+        if(hiddenWeb==null)hiddenWeb=new WebView(this);
         // Keep a desktop-sized layout engine alive without presenting its page.
         // A 1x1 WebView viewport prevented responsive WhatsApp from rendering its QR.
         hiddenWeb.setAlpha(0.01f);hiddenWeb.setVisibility(View.VISIBLE);
@@ -202,7 +206,8 @@ public final class WhatsAppWebActivity extends Activity {
         root.addView(webHost,lp(dp(1),dp(1)));
         setContentView(scroll);
         scroll.requestApplyInsets();
-        hiddenWeb.loadUrl(URL);
+        if(!reused)hiddenWeb.loadUrl(URL);
+        else{loaded=true;handler.postDelayed(this::readPairingState,900);}
         handler.postDelayed(probe,4000);
     }
     private static final String PAIRING_SCRIPT="(function(){try{"+
@@ -330,7 +335,7 @@ public final class WhatsAppWebActivity extends Activity {
     }
     @Override protected void onPause(){CookieManager.getInstance().flush();super.onPause();}
     @Override protected void onDestroy(){if(fileCallback!=null){fileCallback.onReceiveValue(null);fileCallback=null;}closing=true;handler.removeCallbacksAndMessages(null);
-        if(hiddenWeb!=null){hiddenWeb.stopLoading();hiddenWeb.destroy();hiddenWeb=null;}
+        if(hiddenWeb!=null){if(reused&&persistent!=null)persistent.returnFromLinking(hiddenWeb);else{hiddenWeb.stopLoading();hiddenWeb.destroy();}hiddenWeb=null;}
         super.onDestroy();
     }
 }
