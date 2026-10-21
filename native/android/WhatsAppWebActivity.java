@@ -21,7 +21,7 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -37,12 +37,12 @@ public final class WhatsAppWebActivity extends Activity {
     private static final String URL="https://web.whatsapp.com/";
     private static final String UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
     private WebView hiddenWeb;
-    private TextView status, hint, pairingCode;
+    private TextView status, hint, pairingCode, qrPlaceholder;
     private ImageView qr;
     private EditText phoneInput;
     private View phoneArea;
     private final Handler handler=new Handler(Looper.getMainLooper());
-    private boolean closing=false,loaded=false,seenQr=false;
+    private boolean closing=false,loaded=false,seenQr=false,pairingRequested=false;
     private final Runnable probe=new Runnable(){ @Override public void run(){
         if(closing||hiddenWeb==null)return;
         if(loaded)readPairingState();
@@ -56,10 +56,20 @@ public final class WhatsAppWebActivity extends Activity {
         TextView t=new TextView(this);t.setText(str);t.setTextColor(color);t.setTextSize(size);
         t.setGravity(Gravity.CENTER);if(bold)t.setTypeface(null,Typeface.BOLD);return t;
     }
-    private Button button(String label,Runnable onClick){
-        Button b=new Button(this);b.setText(label);b.setAllCaps(false);b.setTextSize(13);
-        b.setBackground(bg(0xff0b7559,26));b.setTextColor(Color.WHITE);
-        b.setOnClickListener(v->onClick.run());return b;
+    private int dp(float amount){return Math.round(getResources().getDisplayMetrics().density*amount);}
+    // A plain clickable TextView prevents Android themes and dark-mode tints from
+    // making labels on green AppCompat/Material buttons unreadable on some devices.
+    private TextView button(String label,Runnable onClick){
+        TextView b=text(label,14,Color.WHITE,true);
+        b.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG);
+        b.setSingleLine(false);b.setMaxLines(2);
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(dp(8),dp(9),dp(8),dp(9));
+        b.setBackground(bg(0xff08775e,dp(14)));
+        b.setClickable(true);b.setFocusable(true);
+        b.setContentDescription(label);
+        b.setOnClickListener(v->onClick.run());
+        return b;
     }
     private LinearLayout.LayoutParams lp(int width,int height){return new LinearLayout.LayoutParams(width,height);}
     private void setStatus(String value,boolean connected){
@@ -69,37 +79,74 @@ public final class WhatsAppWebActivity extends Activity {
     private void openOfficialSite(){startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(URL)));}
     @Override public void onCreate(Bundle state){super.onCreate(state);
         getWindow().setStatusBarColor(0xfff8fafb);
+        getWindow().setNavigationBarColor(0xfff8fafb);
+        getWindow().getDecorView().setSystemUiVisibility(
+            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
         ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);
         LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(0xfff8fafb);root.setPadding(26,35,26,22);
+        root.setBackgroundColor(0xfff8fafb);
+        root.setPadding(dp(18),dp(62),dp(18),dp(22));
+        scroll.setOnApplyWindowInsetsListener((v,insets)->{
+            // Android 15 edge-to-edge otherwise draws the title behind the status bar.
+            int top=Math.max(insets.getSystemWindowInsetTop(),dp(25));
+            int bottom=Math.max(0,insets.getSystemWindowInsetBottom());
+            root.setPadding(dp(18),top+dp(16),dp(18),bottom+dp(22));
+            return insets;
+        });
         scroll.addView(root);
         TextView title=text("قطفة • ربط واتساب",24,0xff104c42,true);root.addView(title,lp(-1,60));
         TextView subtitle=text("شاشة الباركود والرمز فقط",14,0xff54746b,false);root.addView(subtitle,lp(-1,35));
         status=text("🔴 يتم فحص خدمة واتساب…",15,0xff975244,true);status.setBackground(bg(0xffeef4ef,20));
         LinearLayout.LayoutParams sp=lp(-1,58);sp.topMargin=18;root.addView(status,sp);
-        qr=new ImageView(this);qr.setScaleType(ImageView.ScaleType.FIT_CENTER);qr.setBackground(bg(Color.WHITE,20));
-        qr.setPadding(20,20,20,20);LinearLayout.LayoutParams qp=lp(-1,350);qp.topMargin=17;root.addView(qr,qp);
-        hint=text("جارٍ طلب QR من واتساب. إن لم يظهر، فقد لا يسمح واتساب بالعرض داخل تطبيق مدمج.",12,0xff687a79,false);
+        FrameLayout qrCard=new FrameLayout(this);qrCard.setBackground(bg(Color.WHITE,dp(18)));
+        qr=new ImageView(this);qr.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        qr.setPadding(dp(16),dp(16),dp(16),dp(16));
+        qrCard.addView(qr,new FrameLayout.LayoutParams(-1,-1));
+        qrPlaceholder=text("جارٍ جلب رمز QR من واتساب…\n\nإذا بقيت المساحة فارغة، فاستخدم زر تحديث أو الربط بالرقم.",14,0xff697d78,false);
+        qrPlaceholder.setPadding(dp(18),dp(20),dp(18),dp(20));
+        qrCard.addView(qrPlaceholder,new FrameLayout.LayoutParams(-1,-1));
+        LinearLayout.LayoutParams qp=lp(-1,dp(276));qp.topMargin=dp(14);root.addView(qrCard,qp);
+        hint=text("يُعرض رمز QR هنا فقط عندما يرسله واتساب لهذه الجلسة.",13,0xff687a79,false);
         hint.setPadding(7,12,7,12);root.addView(hint,lp(-1,-2));
-        pairingCode=text("رمز الربط: غير متاح بعد",18,0xff0d5345,true);pairingCode.setPadding(0,13,0,13);
-        pairingCode.setBackground(bg(0xffe9f3f0,17));root.addView(pairingCode,lp(-1,-2));
+        pairingCode=text("رمز الربط\nلم يصدر واتساب رمزًا حتى الآن",17,0xff0d5345,true);
+        pairingCode.setMinHeight(dp(80));
+        pairingCode.setPadding(dp(14),dp(15),dp(14),dp(15));
+        pairingCode.setBackground(bg(0xffe9f3f0,dp(15)));
+        pairingCode.setTextIsSelectable(true);
+        root.addView(pairingCode,lp(-1,-2));
         LinearLayout buttons=new LinearLayout(this);buttons.setGravity(Gravity.CENTER);buttons.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams bp=lp(-1,65);bp.topMargin=13;root.addView(buttons,bp);
-        Button refresh=button("تحديث",()->{loaded=false;seenQr=false;setStatus("يتم إعادة طلب الربط",false);hiddenWeb.reload();});
-        Button switchMode=button("ربط بالرقم",()->phoneArea.setVisibility(phoneArea.getVisibility()==View.VISIBLE?View.GONE:View.VISIBLE));
-        buttons.addView(refresh,new LinearLayout.LayoutParams(0,-1,1));buttons.addView(switchMode,new LinearLayout.LayoutParams(0,-1,1));
+        LinearLayout.LayoutParams bp=lp(-1,dp(66));bp.topMargin=dp(12);root.addView(buttons,bp);
+        TextView refresh=button("تحديث الباركود",()->{
+            loaded=false;seenQr=false;pairingRequested=false;qr.setImageDrawable(null);
+            qrPlaceholder.setVisibility(View.VISIBLE);
+            qrPlaceholder.setText("يتم تحديث الباركود…");
+            pairingCode.setText("رمز الربط\nلم يصدر واتساب رمزًا حتى الآن");
+            setStatus("جارٍ إعادة الاتصال",false);hiddenWeb.reload();
+        });
+        TextView switchMode=button("الربط برقم الهاتف",()->{
+            boolean open=phoneArea.getVisibility()!=View.VISIBLE;
+            phoneArea.setVisibility(open?View.VISIBLE:View.GONE);
+        });
+        LinearLayout.LayoutParams first=new LinearLayout.LayoutParams(0,dp(54),1);
+        first.setMargins(dp(4),dp(5),dp(4),dp(5));
+        LinearLayout.LayoutParams second=new LinearLayout.LayoutParams(0,dp(54),1);
+        second.setMargins(dp(4),dp(5),dp(4),dp(5));
+        buttons.addView(refresh,first);buttons.addView(switchMode,second);
         LinearLayout inputs=new LinearLayout(this);inputs.setOrientation(LinearLayout.VERTICAL);inputs.setPadding(8,8,8,8);
         phoneArea=inputs;inputs.setVisibility(View.GONE);root.addView(inputs,lp(-1,-2));
         phoneInput=new EditText(this);phoneInput.setSingleLine(true);phoneInput.setHint("رقم الهاتف مع مفتاح الدولة 967…");
         phoneInput.setInputType(InputType.TYPE_CLASS_PHONE);inputs.addView(phoneInput,lp(-1,58));
-        inputs.addView(button("طلب رمز الربط",this::requestPairingCode),lp(-1,54));
+        inputs.addView(button("طلب رمز ربط الهاتف",this::requestPairingCode),lp(-1,dp(54)));
         TextView warning=text("قد يتعذر إظهار QR أو رمز الاقتران لأن واتساب لا يوفر واجهة عامة لهذا الاستخدام. لن تُفتح محادثاتك داخل قطفة ولن تُقرأ الرسائل.",11,0xff718681,false);
         warning.setPadding(8,18,8,6);root.addView(warning,lp(-1,-2));
-        Button external=button("فتح واتساب في متصفح خارجي عند التعذر",this::openOfficialSite);
-        LinearLayout.LayoutParams ex=lp(-1,58);ex.topMargin=8;root.addView(external,ex);
-        root.addView(button("عودة إلى قطفة",this::finish),lp(-1,52));
+        TextView external=button("فتح واتساب الرسمي عند التعذر",this::openOfficialSite);
+        LinearLayout.LayoutParams ex=lp(-1,dp(54));ex.topMargin=dp(14);root.addView(external,ex);
+        LinearLayout.LayoutParams back=lp(-1,dp(50));back.topMargin=dp(8);
+        root.addView(button("العودة إلى قطفة",this::finish),back);
         hiddenWeb=new WebView(this);
-        hiddenWeb.setAlpha(0.01f);hiddenWeb.setVisibility(View.INVISIBLE);
+        // Keep a desktop-sized layout engine alive without presenting its page.
+        // A 1x1 WebView viewport prevented responsive WhatsApp from rendering its QR.
+        hiddenWeb.setAlpha(0.01f);hiddenWeb.setVisibility(View.VISIBLE);
         WebSettings s=hiddenWeb.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);
         s.setUserAgentString(UA);s.setAllowFileAccess(false);s.setAllowContentAccess(false);
         s.setJavaScriptCanOpenWindowsAutomatically(false);s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
@@ -115,8 +162,14 @@ public final class WhatsAppWebActivity extends Activity {
                 return true;
             }
         });
-        // Attached but never presented: the only user-visible content is QR/code/status.
-        root.addView(hiddenWeb,lp(1,1));setContentView(scroll);
+        // A clipped one-pixel host hides the WebView, while its measured content
+        // viewport stays desktop sized so the login canvas can be rendered.
+        FrameLayout webHost=new FrameLayout(this);
+        webHost.setClipChildren(true);webHost.setClipToPadding(true);
+        webHost.addView(hiddenWeb,new FrameLayout.LayoutParams(dp(1150),dp(820)));
+        root.addView(webHost,lp(dp(1),dp(1)));
+        setContentView(scroll);
+        scroll.requestApplyInsets();
         hiddenWeb.loadUrl(URL);
         handler.postDelayed(probe,4000);
     }
