@@ -30,6 +30,14 @@ public class QatfahNativePlugin extends Plugin {
     if(direct==null){JSObject out=new JSObject();out.put("status","not_started");call.resolve(out);return;}
     direct.getConnectionStatus(call);
   }
+  @PluginMethod public void whatsappPairingStatus(PluginCall call){
+    if(direct==null)direct=new QatfahWhatsappDirect(getActivity());
+    direct.pairingStatus(call);
+  }
+  @PluginMethod public void whatsappPairingPhone(PluginCall call){
+    if(direct==null)direct=new QatfahWhatsappDirect(getActivity());
+    direct.pairingPhone(call,call.getString("phone",""));
+  }
   @PluginMethod public void openWhatsAppWeb(PluginCall call) {
     getActivity().runOnUiThread(()->{
       try {
