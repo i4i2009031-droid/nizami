@@ -293,23 +293,25 @@ function openEvent(id){
 function fixWhatsappNumber(phone){let s=String(phone||'').replace(/\D/g,'');if(s.startsWith('00'))s=s.slice(2);if(s.startsWith('0')&&s.length===10)s='967'+s.slice(1);if(s.length===9&&s.startsWith('7'))s='967'+s;if(!/^\d{9,15}$/.test(s))throw Error('تأكد من رقم العميل في الحسابات، بصيغة +9677XXXXXXXX');return s;}
 async function sendPdfToWhatsapp(phone,blob,filename,caption=''){
  const number=fixWhatsappNumber(phone);
- if(!navigator.onLine)toast('المستند جاهز أوفلاين؛ لن يصل حتى يتصل الهاتف بالإنترنت');
- const native=window.Capacitor?.Plugins?.QatfahNative;
- if(native?.sharePdfWhatsApp){
-   const bytes=new Uint8Array(await blob.arrayBuffer());
-   let raw='';for(let i=0;i<bytes.length;i+=32768)raw+=String.fromCharCode(...bytes.subarray(i,i+32768));
-   await native.sharePdfWhatsApp({base64:btoa(raw),filename,caption:`${caption} — رقم العميل +${number}`,phone:'+'+number});
-   toast('تُفتح المشاركة في واتساب الآن؛ اختر العميل وأكّد زر الإرسال');
- } else {
-   await sharePdf(blob,filename,{text:`إلى العميل +${number} — ${caption}`});
-   toast('اختر واتساب من نافذة المشاركة ثم حدّد المحادثة وأكّد الإرسال');
- }
+ const plugin=window.Capacitor?.Plugins?.QatfahNative;
+ if(!plugin?.sendWhatsAppInApp)throw Error('الإرسال الداخلي يتطلب نسخة قطفة الجديدة على أندرويد');
+ if(!navigator.onLine)throw Error('اتصل بالإنترنت لفتح واتساب');
+ const arr=new Uint8Array(await blob.arrayBuffer());
+ if(arr.length>5000000)throw Error('المستند أكبر من 5 ميجابايت');
+ let raw='';for(let i=0;i<arr.length;i+=32768)raw+=String.fromCharCode(...arr.subarray(i,i+32768));
+ const result=await plugin.sendWhatsAppInApp({phone:number,caption,base64:btoa(raw),filename});
+ toast(result.message||'افتح المحادثة المدمجة وأكد الإرسال');
 }
 async function shareWhatsapp(phone,text){
- let number;try{number=fixWhatsappNumber(phone);}catch(e){return toast(e.message)}
- if(!navigator.onLine)return toast('إرسال الرسالة يتطلب اتصالًا بالإنترنت');
- window.open(`https://wa.me/${number}?text=${encodeURIComponent(text)}`,'_blank','noopener,noreferrer');
+ try{
+  const number=fixWhatsappNumber(phone);
+  const plugin=window.Capacitor?.Plugins?.QatfahNative;
+  if(!plugin?.sendWhatsAppInApp)throw Error('الإرسال الداخلي متاح في تطبيق أندرويد فقط');
+  const result=await plugin.sendWhatsAppInApp({phone:number,caption:text});
+  toast(result.message||'تم فتح المحادثة داخل قطفة');
+ }catch(e){toast(e.message);}
 }
+
 function openWhatsapp(){
  showSheet('ربط واتساب في قطفة',`<div class="qr-box"><h3>ربط واتساب</h3><p class="hint">تظهر شاشة صغيرة للباركود أو رمز الهاتف وحالة الاتصال فقط، دون عرض صفحة المحادثات داخل قطفة. قد يمنع واتساب استخراج الرمز من WebView غير رسمي.</p><button type="button" id="wa-native" class="btn btn-primary">فتح شاشة QR / رمز الربط</button><p class="hint">عند إرسال PDF من الفواتير والكشوف، يُفتح تطبيق واتساب الأصلي لاختيار المستلم وتأكيد الإرسال؛ لا يملك قطفة واجهة رسمية للإرسال المخفي بلا تأكيد.</p></div>`);
  $('wa-native').onclick=async()=>{try{const p=window.Capacitor?.Plugins?.QatfahNative;if(!p?.openWhatsAppWeb)throw Error('شاشة الربط المدمجة متاحة على Android فقط');await p.openWhatsAppWeb();}catch(e){toast(e.message)}};
