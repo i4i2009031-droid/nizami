@@ -170,13 +170,14 @@ public final class WhatsAppWebActivity extends Activity {
         // Keep a desktop-sized layout engine alive without presenting its page.
         // A 1x1 WebView viewport prevented responsive WhatsApp from rendering its QR.
         hiddenWeb.setAlpha(0.01f);hiddenWeb.setVisibility(View.VISIBLE);
+        if(!reused){
         WebSettings s=hiddenWeb.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);
         s.setUserAgentString(UA);s.setAllowFileAccess(false);s.setAllowContentAccess(false);
         s.setJavaScriptCanOpenWindowsAutomatically(false);s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         s.setUseWideViewPort(true);s.setLoadWithOverviewMode(true);s.setSupportMultipleWindows(false);
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(hiddenWeb,true);
-        if(!reused)hiddenWeb.setWebChromeClient(new WebChromeClient(){
+        hiddenWeb.setWebChromeClient(new WebChromeClient(){
             @Override public boolean onShowFileChooser(WebView view,ValueCallback<Uri[]> callback,FileChooserParams params){
                 if(fileCallback!=null)fileCallback.onReceiveValue(null);
                 fileCallback=callback;
@@ -195,7 +196,7 @@ public final class WhatsAppWebActivity extends Activity {
                 }catch(Exception e){fileCallback=null;callback.onReceiveValue(null);return true;}
             }
         });
-        if(!reused)hiddenWeb.setWebViewClient(new WebViewClient(){
+        hiddenWeb.setWebViewClient(new WebViewClient(){
             @Override public void onPageFinished(WebView view,String u){loaded=true;readPairingState();}
             @Override public boolean shouldOverrideUrlLoading(WebView w, WebResourceRequest r){
                 Uri u=r.getUrl();String host=u.getHost();
@@ -203,6 +204,7 @@ public final class WhatsAppWebActivity extends Activity {
                 return true;
             }
         });
+        }
         // A clipped one-pixel host hides the WebView, while its measured content
         // viewport stays desktop sized so the login canvas can be rendered.
         webHost=new FrameLayout(this);
