@@ -6,7 +6,7 @@ for(const f of ['QatfahNativePlugin.java','WhatsAppWebActivity.java'])fs.copyFil
 fs.writeFileSync(path.join(dir,'MainActivity.java'),`package ${pkg};\nimport android.os.Bundle;\nimport com.getcapacitor.BridgeActivity;\npublic class MainActivity extends BridgeActivity { @Override public void onCreate(Bundle state) { registerPlugin(QatfahNativePlugin.class); super.onCreate(state); } }\n`);
 const manifest=path.resolve('android/app/src/main/AndroidManifest.xml');let xml=fs.readFileSync(manifest,'utf8');if(!xml.includes('WhatsAppWebActivity'))xml=xml.replace('</application>','<activity android:name=".WhatsAppWebActivity" android:exported="false" android:windowSoftInputMode="adjustResize"/>\n    </application>');if(!xml.includes('androidx.core.content.FileProvider')){
  const provider='<provider android:name="androidx.core.content.FileProvider" android:authorities="\u0024{applicationId}.waattachments" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/qatfah_wa_paths"/></provider>';
- xml=xml.replace('</application>',provider+'\\n    </application>');
+ xml=xml.replace('</application>',provider+String.fromCharCode(10)+'    </application>');
 }
 const xmlDir=path.resolve('android/app/src/main/res/xml');fs.mkdirSync(xmlDir,{recursive:true});
 fs.writeFileSync(path.join(xmlDir,'qatfah_wa_paths.xml'),'<?xml version="1.0" encoding="utf-8"?><paths xmlns:android="http://schemas.android.com/apk/res/android"><cache-path name="wa-attachments" path="wa-attachments/"/></paths>');
