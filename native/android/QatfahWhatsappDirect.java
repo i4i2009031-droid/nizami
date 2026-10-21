@@ -55,14 +55,20 @@ public final class QatfahWhatsappDirect {
   CookieManager.getInstance().setAcceptCookie(true);
   CookieManager.getInstance().setAcceptThirdPartyCookies(web,true);
   web.setAlpha(0.01f);
+  web.setVisibility(View.VISIBLE);
   ViewGroup host=activity.findViewById(android.R.id.content);
   parkedFrame=new FrameLayout(activity);
   parkedFrame.setClipChildren(true);parkedFrame.setClipToPadding(true);
   FrameLayout.LayoutParams desktopSize=new FrameLayout.LayoutParams((int)(1100*activity.getResources().getDisplayMetrics().density),(int)(800*activity.getResources().getDisplayMetrics().density));
   parkedFrame.addView(web,desktopSize);
-  host.addView(parkedFrame,new ViewGroup.LayoutParams(1,1));
+  FrameLayout.LayoutParams params=new FrameLayout.LayoutParams(2,2,android.view.Gravity.BOTTOM|android.view.Gravity.RIGHT);
+  host.addView(parkedFrame,params);
   installWebClient();
   web.loadUrl("https://web.whatsapp.com/");
+  handler.postDelayed(new Runnable(){@Override public void run(){
+   if(web!=null&&pending==null&&!inLinkScreen)web.evaluateJavascript("document.readyState",null);
+   handler.postDelayed(this,5000);
+  }},5000);
  }
  private void installWebClient(){
   web.setWebViewClient(new WebViewClient(){
@@ -80,7 +86,7 @@ public final class QatfahWhatsappDirect {
  /** The QR screen observes the same WebView without detaching or reloading it. */
  public WebView takeForLinking() throws Exception {
   init();
-  if(pending!=null||inLinkScreen)return null;
+  if(pending!=null)return null;
   inLinkScreen=true;
   return web;
  }
@@ -127,6 +133,46 @@ public final class QatfahWhatsappDirect {
     out.put("previouslyLinked",lastLinkedAt>0L);
     call.resolve(out);
    });
+  });
+ }
+ private static final String PAIRING_STATE="(function(){try{"+
+  "if(document.querySelector('#pane-side,[data-testid=chat-list],[data-testid=chatlist-header],#main footer'))return JSON.stringify({status:'connected'});"+
+  "var canv=[...document.querySelectorAll('canvas')].find(x=>x.width>=140&&x.height>=140);"+
+  "var qr='';if(canv){try{qr=canv.toDataURL('image/png')}catch(e){}}"+
+  "var code='';for(var el of document.querySelectorAll('div,span,strong')){var t=(el.textContent||'').trim();if(el.children.length===0&&/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(t)){code=t;break}}"+
+  "return JSON.stringify({status:qr?'not_linked':'checking',qr:qr,code:code})"+
+  "}catch(e){return JSON.stringify({status:'unknown'})}})()";
+ public void pairingStatus(PluginCall call){
+  activity.runOnUiThread(()->{
+   try{init();web.evaluateJavascript(PAIRING_STATE,value->{
+    try{JSONObject state=new JSONObject(decode(value));JSObject out=new JSObject();
+     out.put("status",state.optString("status","unknown"));
+     String qr=state.optString("qr","");
+     out.put("qr",qr.length()<500000?qr:"");
+     out.put("code",state.optString("code",""));call.resolve(out);
+    }catch(Exception e){call.reject("تعذر فحص الربط",e);}
+   });}catch(Exception e){call.reject("تعذر تشغيل واتساب",e);}
+  });
+ }
+ public void pairingPhone(PluginCall call,String phone){
+  activity.runOnUiThread(()->{
+   if(!phone.matches("[0-9]{9,15}")){call.reject("رقم غير صحيح");return;}
+   if(pending!=null){call.reject("عملية إرسال جارية");return;}
+   try{init();String js="(function(){var b=[...document.querySelectorAll('button,[role=button]')].find(x=>/link with phone|phone number|رقم الهاتف|ربط.*رقم/i.test(x.innerText||x.textContent||''));if(b){b.click();return 'ok'}return 'no'})()";
+    web.evaluateJavascript(js,value->handler.postDelayed(()->fillPairingPhone(phone,call,0),1500));
+   }catch(Exception e){call.reject("تعذر طلب الرمز",e);}
+  });
+ }
+ private void fillPairingPhone(String phone,PluginCall call,int attempt){
+  String js="(function(){var x=document.querySelector('input[type=tel],input[inputmode=tel]');if(!x)return 'waiting';"+
+   "var setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;setter.call(x,"+JSONObject.quote(phone)+");"+
+   "x.dispatchEvent(new Event('input',{bubbles:true}));"+
+   "var btn=[...document.querySelectorAll('button,[role=button]')].find(b=>/next|التالي|continue|متابعة/i.test(b.innerText||b.textContent||''));"+
+   "if(btn&&!btn.disabled){btn.click();return 'sent'}return 'waiting'})()";
+  web.evaluateJavascript(js,value->{
+   if(value.contains("sent")){JSObject out=new JSObject();out.put("requested",true);call.resolve(out);}
+   else if(attempt<7)handler.postDelayed(()->fillPairingPhone(phone,call,attempt+1),1200);
+   else call.reject("واتساب لم يوفر حقل الربط بالرقم");
   });
  }
  private void fail(String message){
@@ -203,7 +249,7 @@ public final class QatfahWhatsappDirect {
  }
  public void send(PluginCall call){
   activity.runOnUiThread(()->{
-   if(pending!=null||inLinkScreen){call.reject("واتساب مشغول بربط الجهاز أو إرسال آخر");return;}
+   if(pending!=null){call.reject("يوجد إرسال جارٍ بالفعل");return;}
    try{
     pending=call;startedAt=System.currentTimeMillis();uploading=true;atRecipient=false;
     init();

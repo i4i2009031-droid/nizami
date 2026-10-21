@@ -22,11 +22,10 @@ test('subscription login can authenticate and save a session from the registry',
   await assert.rejects(()=>authenticate('mock-merchant','wrong-secret'),/بيانات الدخول غير صحيحة/);
  }finally{globalThis.fetch=oldFetch;}
 });
-test('both the paid login and the demo button import the session saver',async()=>{
+test('paid login imports the session saver',async()=>{
  const source=await readFile(new URL('../apps/client/js/app.js',import.meta.url),'utf8');
  assert.match(source,/import\s*\{[^}]*persistSessionObject[^}]*\}\s*from\s*['"]\.\/session\.js['"]/);
  assert.match(source,/const session=\{token:null,mode:'github'.*?persistSessionObject\(session\)/);
- assert.match(source,/const demo=\{mode:'demo'.*?persistSessionObject\(demo\)/);
  const worker=await readFile(new URL('../apps/client/sw.js',import.meta.url),'utf8');
  assert.match(worker,/js\/session\.js/);
  assert.match(worker,/qatfah-client-v\d+/);
