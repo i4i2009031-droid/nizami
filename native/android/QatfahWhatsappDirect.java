@@ -6,6 +6,10 @@ import android.os.Looper;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.view.Gravity;
+import android.graphics.Color;
+import android.widget.TextView;
+import android.widget.LinearLayout;
 import android.webkit.WebChromeClient;
 import android.widget.FrameLayout;
 import android.webkit.CookieManager;
@@ -19,6 +23,8 @@ import com.getcapacitor.JSObject;
 import org.json.JSONObject;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** Best-effort, in-process WhatsApp Web companion. No external window or sharesheet.
  * Never reports delivery confirmed; DOM changes and WebView blocking must be handled.
@@ -27,6 +33,10 @@ public final class QatfahWhatsappDirect {
  private static QatfahWhatsappDirect shared;
  private final Activity activity;
  private FrameLayout parkedFrame;
+ private LinearLayout pairingToolbar;
+ private boolean pairingPageVisible=false;
+ private String lastLoadError="";
+ private long lastPageStart=0L;
  private boolean inLinkScreen=false;
  private boolean chatVisible=false;
  private long lastLinkedAt=0L;
@@ -36,7 +46,15 @@ public final class QatfahWhatsappDirect {
  private String script;
  private boolean loaded=false,injected=false,uploading=false,atRecipient=false;
  private long startedAt;
- private static final String UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+ /** Match the installed Chromium engine rather than claim an obsolete Chrome 131. */
+ private static String desktopUserAgent(Activity activity){
+  String systemUa=WebSettings.getDefaultUserAgent(activity);
+  Matcher match=Pattern.compile("Chrome/([0-9.]+)").matcher(systemUa);
+  String version=match.find()?match.group(1):"131.0.0.0";
+  return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+version+" Safari/537.36";
+ }
+ private int dp(int value){return Math.round(value*activity.getResources().getDisplayMetrics().density);}
+
  public QatfahWhatsappDirect(Activity activity){this.activity=activity;shared=this;}
  public static QatfahWhatsappDirect getShared(){return shared;}
  private void init() throws Exception{
@@ -49,7 +67,9 @@ public final class QatfahWhatsappDirect {
   web=new WebView(activity);
   WebSettings settings=web.getSettings();
   settings.setJavaScriptEnabled(true);settings.setDomStorageEnabled(true);
-  settings.setUserAgentString(UA);settings.setUseWideViewPort(true);
+  settings.setUserAgentString(desktopUserAgent(activity));settings.setUseWideViewPort(true);
+  settings.setLoadWithOverviewMode(true);settings.setSupportMultipleWindows(false);
+  settings.setJavaScriptCanOpenWindowsAutomatically(false);
   settings.setAllowFileAccess(false);settings.setAllowContentAccess(false);
   settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
   CookieManager.getInstance().setAcceptCookie(true);
@@ -72,6 +92,12 @@ public final class QatfahWhatsappDirect {
  }
  private void installWebClient(){
   web.setWebViewClient(new WebViewClient(){
+    @Override public void onPageStarted(WebView view,String url,android.graphics.Bitmap favicon){
+      loaded=false;lastLoadError="";lastPageStart=System.currentTimeMillis();
+    }
+    @Override public void onReceivedError(WebView view,WebResourceRequest request,android.webkit.WebResourceError error){
+      if(request.isForMainFrame())lastLoadError=String.valueOf(error.getDescription());
+    }
     @Override public void onPageFinished(WebView view,String url){
       if(!url.startsWith("https://web.whatsapp.com/"))return;
       loaded=true;injected=false;
@@ -80,6 +106,59 @@ public final class QatfahWhatsappDirect {
     @Override public boolean shouldOverrideUrlLoading(WebView view,WebResourceRequest request){
       Uri url=request.getUrl();return !("https".equals(url.getScheme())&&"web.whatsapp.com".equals(url.getHost()));
     }
+  });
+ }
+ public void showPairingPage(PluginCall call){
+  activity.runOnUiThread(()->{
+   try{
+    init();
+    if(pending!=null){call.reject("هناك إرسال جارٍ؛ لا يمكن فتح شاشة الربط الآن");return;}
+    if(!pairingPageVisible){
+      pairingPageVisible=true;
+      parkedFrame.setLayoutParams(new FrameLayout.LayoutParams(-1,-1,Gravity.TOP));
+      parkedFrame.setAlpha(1f);parkedFrame.setBackgroundColor(Color.WHITE);
+      web.setAlpha(1f);
+      FrameLayout.LayoutParams webSize=new FrameLayout.LayoutParams(-1,-1);
+      webSize.topMargin=dp(58);
+      web.setLayoutParams(webSize);
+      pairingToolbar=new LinearLayout(activity);
+      pairingToolbar.setBackgroundColor(Color.rgb(236,246,242));
+      pairingToolbar.setGravity(Gravity.CENTER_VERTICAL);
+      pairingToolbar.setOrientation(LinearLayout.HORIZONTAL);
+      TextView close=new TextView(activity);
+      close.setText("✕  العودة إلى قطفة");close.setTextSize(15);close.setTextColor(Color.rgb(0,101,77));
+      close.setGravity(Gravity.CENTER);close.setOnClickListener(v->hidePairingPage());
+      pairingToolbar.addView(close,new LinearLayout.LayoutParams(0,dp(56),2f));
+      TextView refresh=new TextView(activity);
+      refresh.setText("تحديث");refresh.setTextSize(14);refresh.setTextColor(Color.rgb(0,101,77));
+      refresh.setGravity(Gravity.CENTER);refresh.setOnClickListener(v->{if(pending==null)web.reload();});
+      pairingToolbar.addView(refresh,new LinearLayout.LayoutParams(0,dp(56),1f));
+      parkedFrame.addView(pairingToolbar,new FrameLayout.LayoutParams(-1,dp(58),Gravity.TOP));
+      parkedFrame.bringToFront();
+    }
+    JSObject out=new JSObject();out.put("visible",true);call.resolve(out);
+   }catch(Exception e){call.reject("تعذر عرض صفحة واتساب",e);}
+  });
+ }
+ public void hidePairingPage(){
+  activity.runOnUiThread(()->{
+   if(!pairingPageVisible||parkedFrame==null||web==null)return;
+   if(pairingToolbar!=null)parkedFrame.removeView(pairingToolbar);
+   pairingToolbar=null;pairingPageVisible=false;
+   FrameLayout.LayoutParams parkedWeb=new FrameLayout.LayoutParams(dp(1100),dp(800));
+   web.setLayoutParams(parkedWeb);web.setAlpha(0.01f);
+   parkedFrame.setAlpha(0.01f);parkedFrame.setBackgroundColor(Color.TRANSPARENT);
+   parkedFrame.setLayoutParams(new FrameLayout.LayoutParams(dp(2),dp(2),Gravity.BOTTOM|Gravity.RIGHT));
+   CookieManager.getInstance().flush();
+  });
+ }
+ public void hidePairingPage(PluginCall call){hidePairingPage();call.resolve();}
+ public void retryLoading(PluginCall call){
+  activity.runOnUiThread(()->{
+   try{init();if(pending!=null){call.reject("إرسال جارٍ");return;}
+     lastLoadError="";lastPageStart=System.currentTimeMillis();
+     web.reload();call.resolve();
+   }catch(Exception e){call.reject("تعذر تحديث صفحة واتساب",e);}
   });
  }
  public void ensureRunning() throws Exception {init();}
@@ -250,6 +329,7 @@ public final class QatfahWhatsappDirect {
  public void send(PluginCall call){
   activity.runOnUiThread(()->{
    if(pending!=null){call.reject("يوجد إرسال جارٍ بالفعل");return;}
+   if(pairingPageVisible)hidePairingPage();
    try{
     pending=call;startedAt=System.currentTimeMillis();uploading=true;atRecipient=false;
     init();
