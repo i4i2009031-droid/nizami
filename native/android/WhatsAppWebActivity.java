@@ -55,7 +55,7 @@ public final class WhatsAppWebActivity extends Activity {
     private ValueCallback<Uri[]> fileCallback;
     private static final int PICK_PDF=9205;
     private final Handler handler=new Handler(Looper.getMainLooper());
-    private boolean closing=false,loaded=false,seenQr=false,pairingRequested=false;
+    private boolean closing=false,loaded=false,seenQr=false,pairingRequested=false,linkedBefore=false;
     private final Runnable probe=new Runnable(){ @Override public void run(){
         if(closing||hiddenWeb==null)return;
         if(loaded)readPairingState();
@@ -137,7 +137,9 @@ public final class WhatsAppWebActivity extends Activity {
             qrPlaceholder.setVisibility(View.VISIBLE);
             qrPlaceholder.setText("يتم تحديث الباركود…");
             pairingCode.setText("رمز الربط\nلم يصدر واتساب رمزًا حتى الآن");
-            setStatus("جارٍ إعادة الاتصال",false);hiddenWeb.reload();
+            setStatus("جارٍ فحص حالة الربط",false);
+            if(reused){loaded=true;readPairingState();}
+            else hiddenWeb.reload();
         });
         TextView switchMode=button("الربط برقم الهاتف",()->{
             boolean open=phoneArea.getVisibility()!=View.VISIBLE;
@@ -161,10 +163,14 @@ public final class WhatsAppWebActivity extends Activity {
         root.addView(button("العودة إلى قطفة",this::finish),back);
         persistent=QatfahWhatsappDirect.getShared();
         if(persistent!=null){try{hiddenWeb=persistent.takeForLinking();reused=hiddenWeb!=null;}catch(Exception ignored){}}
-        if(hiddenWeb==null)hiddenWeb=new WebView(this);
+        if(hiddenWeb==null){
+            status.setText("تعذر الوصول إلى جلسة واتساب الحالية. عد إلى قطفة وأعد فتح القسم.");
+            setContentView(scroll);return;
+        }
         // Keep a desktop-sized layout engine alive without presenting its page.
         // A 1x1 WebView viewport prevented responsive WhatsApp from rendering its QR.
         hiddenWeb.setAlpha(0.01f);hiddenWeb.setVisibility(View.VISIBLE);
+        if(!reused){
         WebSettings s=hiddenWeb.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);
         s.setUserAgentString(UA);s.setAllowFileAccess(false);s.setAllowContentAccess(false);
         s.setJavaScriptCanOpenWindowsAutomatically(false);s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
@@ -198,11 +204,12 @@ public final class WhatsAppWebActivity extends Activity {
                 return true;
             }
         });
+        }
         // A clipped one-pixel host hides the WebView, while its measured content
         // viewport stays desktop sized so the login canvas can be rendered.
         webHost=new FrameLayout(this);
         webHost.setClipChildren(true);webHost.setClipToPadding(true);
-        webHost.addView(hiddenWeb,new FrameLayout.LayoutParams(dp(1150),dp(820)));
+        if(!reused)webHost.addView(hiddenWeb,new FrameLayout.LayoutParams(dp(1150),dp(820)));
         root.addView(webHost,lp(dp(1),dp(1)));
         setContentView(scroll);
         scroll.requestApplyInsets();
@@ -230,21 +237,37 @@ public final class WhatsAppWebActivity extends Activity {
                 if(value.startsWith("\""))unwrapped=(String)new org.json.JSONTokener(value).nextValue();
                 JSONObject obj=new JSONObject(unwrapped);
                 if(obj.optBoolean("connected")){
-                    setStatus("متصل بهذه الجلسة في الوقت الحالي",true);
-                    hint.setText("واتساب مرتبط. افتح المحادثات من الزر أدناه واستخدم زر إرسال واتساب نفسه.");
+                    linkedBefore=true;
+                    seenQr=false;
+                    setStatus("واتساب متصل بجميع أقسام قطفة",true);
+                    hint.setText("الجلسة تعمل داخل قطفة طوال بقاء التطبيق نشطًا. يمكنك الرجوع للفواتير والسندات.");
+                    qr.setImageDrawable(null);
+                    qrPlaceholder.setText("واتساب متصل. لا تحتاج إلى باركود جديد.");
+                    qrPlaceholder.setVisibility(View.VISIBLE);
+                    pairingCode.setText("متصل وجاهز للإرسال");
                     if(!targetPhone.isEmpty())showChat();
-                    qr.setImageDrawable(null);pairingCode.setText("تم الربط");return;
+                    return;
                 }
                 String image=obj.optString("qr","");
                 if(image.startsWith("data:image/png;base64,")&&image.length()<500_000){
                     byte[] decoded=Base64.decode(image.substring(image.indexOf(',')+1),Base64.DEFAULT);
                     Bitmap bmp=BitmapFactory.decodeByteArray(decoded,0,decoded.length);
-                    if(bmp!=null){qr.setImageBitmap(bmp);seenQr=true;setStatus("غير متصل • امسح الباركود",false);
+                    if(bmp!=null){qr.setImageBitmap(bmp);qrPlaceholder.setVisibility(View.GONE);seenQr=true;setStatus("يلزم ربط واتساب • امسح الباركود",false);
                         hint.setText("من واتساب في هاتفك: الأجهزة المرتبطة ← ربط جهاز، ثم امسح الرمز.");}
                 }
                 String code=obj.optString("code","");
                 if(!code.isEmpty())pairingCode.setText("رمز الربط: "+code);
-                if(!seenQr&&!obj.optBoolean("connected"))setStatus("غير متصل • انتظار الرمز",false);
+                if(!seenQr){
+                    if(linkedBefore){
+                        status.setText("🟠 جارٍ التحقق من الاتصال الحالي...");
+                        status.setTextColor(0xff996920);
+                        qrPlaceholder.setText("يتم فحص جلسة واتساب السابقة. لا يلزم ربط جديد إلا إذا ظهر QR فعليًا.");
+                        qrPlaceholder.setVisibility(View.VISIBLE);
+                    }else{
+                        status.setText("🟠 انتظار تحميل رمز الربط");
+                        status.setTextColor(0xff996920);
+                    }
+                }
             }catch(Exception e){hint.setText("تعذر قراءة الرمز من نسخة واتساب الحالية. يمكنك استخدام الربط الخارجي.");}
         });
     }
@@ -294,6 +317,7 @@ public final class WhatsAppWebActivity extends Activity {
     private void showChat(){
         if(hiddenWeb==null)return;
         if(chatVisible)return;
+        if(reused && (persistent==null||!persistent.detachForChat(hiddenWeb)))return;
         chatVisible=true;
         root.removeView(webHost);
         root.removeAllViews();

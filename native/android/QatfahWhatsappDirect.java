@@ -28,6 +28,8 @@ public final class QatfahWhatsappDirect {
  private final Activity activity;
  private FrameLayout parkedFrame;
  private boolean inLinkScreen=false;
+ private boolean chatVisible=false;
+ private long lastLinkedAt=0L;
  private final Handler handler=new Handler(Looper.getMainLooper());
  private WebView web;
  private PluginCall pending;
@@ -75,34 +77,56 @@ public final class QatfahWhatsappDirect {
   });
  }
  public void ensureRunning() throws Exception {init();}
+ /** The QR screen observes the same WebView without detaching or reloading it. */
  public WebView takeForLinking() throws Exception {
   init();
   if(pending!=null||inLinkScreen)return null;
   inLinkScreen=true;
+  return web;
+ }
+ /** Manual chats are optional: only detach on explicit request to display them. */
+ public boolean detachForChat(WebView requested){
+  if(requested!=web||!inLinkScreen||pending!=null)return false;
   ViewParent old=web.getParent();
   if(old instanceof ViewGroup)((ViewGroup)old).removeView(web);
-  return web;
+  chatVisible=true;
+  return true;
  }
  public void returnFromLinking(WebView borrowed){
   if(borrowed==null||borrowed!=web||parkedFrame==null)return;
-  ViewParent old=web.getParent();
-  if(old instanceof ViewGroup)((ViewGroup)old).removeView(web);
+  if(chatVisible){
+   ViewParent old=web.getParent();
+   if(old instanceof ViewGroup)((ViewGroup)old).removeView(web);
+   FrameLayout.LayoutParams desktop=new FrameLayout.LayoutParams(
+    (int)(1100*activity.getResources().getDisplayMetrics().density),
+    (int)(800*activity.getResources().getDisplayMetrics().density));
+   parkedFrame.addView(web,desktop);
+   web.setWebChromeClient(new WebChromeClient());
+   installWebClient();
+  }
   web.setAlpha(0.01f);
-  FrameLayout.LayoutParams desktop=new FrameLayout.LayoutParams(
-   (int)(1100*activity.getResources().getDisplayMetrics().density),
-   (int)(800*activity.getResources().getDisplayMetrics().density));
-  parkedFrame.addView(web,desktop);
-  web.setWebChromeClient(new WebChromeClient());
-  installWebClient();
-  loaded=true;atRecipient=false;inLinkScreen=false;
+  chatVisible=false;inLinkScreen=false;atRecipient=false;
   CookieManager.getInstance().flush();
  }
  public void getConnectionStatus(PluginCall call){
   activity.runOnUiThread(()->{
    if(web==null){JSObject out=new JSObject();out.put("status","not_started");call.resolve(out);return;}
-   if(inLinkScreen){JSObject out=new JSObject();out.put("status","linking");call.resolve(out);return;}
-   String js="(function(){try{if(document.querySelector('#pane-side,[data-testid=chat-list],[data-testid=chatlist-header]'))return 'connected';if(document.querySelector('[data-testid*=qr] canvas,canvas[aria-label*=QR]'))return 'not_linked';return 'connecting'}catch(e){return 'unknown'}})()";
-   web.evaluateJavascript(js,value->{JSObject out=new JSObject();out.put("status",decode(value));call.resolve(out);});
+   String js="(function(){try{"+
+    "if(!navigator.onLine)return 'offline';"+
+    "if(document.querySelector('#pane-side,[data-testid=chat-list],[data-testid=chatlist-header],#main footer'))return 'connected';"+
+    "if(document.querySelector('[data-testid*=qr] canvas,canvas[aria-label*=QR]'))return 'not_linked';"+
+    "return document.readyState==='loading'?'loading':'reconnecting';"+
+    "}catch(e){return 'unknown'}})()";
+   web.evaluateJavascript(js,value->{
+    String status=decode(value);
+    if("connected".equals(status))lastLinkedAt=System.currentTimeMillis();
+    else if("reconnecting".equals(status)&&lastLinkedAt>0L)status="reconnecting";
+    if(inLinkScreen&&!"connected".equals(status)&&!"offline".equals(status))status="linking";
+    JSObject out=new JSObject();out.put("status",status);
+    out.put("sessionAlive",true);
+    out.put("previouslyLinked",lastLinkedAt>0L);
+    call.resolve(out);
+   });
   });
  }
  private void fail(String message){
