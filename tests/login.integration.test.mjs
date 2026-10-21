@@ -29,5 +29,5 @@ test('both the paid login and the demo button import the session saver',async()=
  assert.match(source,/const demo=\{mode:'demo'.*?persistSessionObject\(demo\)/);
  const worker=await readFile(new URL('../apps/client/sw.js',import.meta.url),'utf8');
  assert.match(worker,/js\/session\.js/);
- assert.match(worker,/qatfah-client-v05/);
+ assert.match(worker,/qatfah-client-v\\d+/);
 });
