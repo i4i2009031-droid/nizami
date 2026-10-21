@@ -31,8 +31,14 @@ public class QatfahNativePlugin extends Plugin {
     direct.getConnectionStatus(call);
   }
   @PluginMethod public void openWhatsAppWeb(PluginCall call) {
-    try { getActivity().startActivity(new Intent(getActivity(),WhatsAppWebActivity.class));call.resolve(); }
-    catch(Exception ex) { call.reject("تعذر فتح واتساب ويب",ex); }
+    getActivity().runOnUiThread(()->{
+      try {
+        if(direct==null)direct=new QatfahWhatsappDirect(getActivity());
+        direct.ensureRunning();
+        getActivity().startActivity(new Intent(getActivity(),WhatsAppWebActivity.class));
+        call.resolve();
+      } catch(Exception ex) { call.reject("تعذر فتح جلسة واتساب المدمجة",ex); }
+    });
   }
 
   private QatfahWhatsappDirect direct;
