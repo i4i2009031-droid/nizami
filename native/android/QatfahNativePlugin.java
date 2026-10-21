@@ -23,6 +23,13 @@ import java.nio.charset.StandardCharsets;
 public class QatfahNativePlugin extends Plugin {
   private static final int MAX_BYTES=40*1024*1024;
 
+  @PluginMethod public void startWhatsAppSession(PluginCall call){
+    getActivity().runOnUiThread(()->{try{if(direct==null)direct=new QatfahWhatsappDirect(getActivity());direct.ensureRunning();call.resolve();}catch(Exception e){call.reject("تعذر تشغيل واتساب المدمج",e);}});
+  }
+  @PluginMethod public void whatsappConnectionStatus(PluginCall call){
+    if(direct==null){JSObject out=new JSObject();out.put("status","not_started");call.resolve(out);return;}
+    direct.getConnectionStatus(call);
+  }
   @PluginMethod public void openWhatsAppWeb(PluginCall call) {
     try { getActivity().startActivity(new Intent(getActivity(),WhatsAppWebActivity.class));call.resolve(); }
     catch(Exception ex) { call.reject("تعذر فتح واتساب ويب",ex); }
