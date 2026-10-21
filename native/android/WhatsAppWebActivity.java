@@ -310,7 +310,7 @@ public final class WhatsAppWebActivity extends Activity {
         hiddenWeb.setVisibility(View.VISIBLE);
         webHost.removeView(hiddenWeb);
         webHost.addView(hiddenWeb,new FrameLayout.LayoutParams(-1,-1));
-        LinearLayout.LayoutParams fill=new LinearLayout.LayoutParams(-1,0,1);
+        LinearLayout.LayoutParams fill=new LinearLayout.LayoutParams(-1,dp(760));
         root.addView(webHost,fill);
         handler.removeCallbacks(probe);
         if(!targetPhone.isEmpty()){
