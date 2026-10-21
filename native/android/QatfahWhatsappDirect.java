@@ -5,6 +5,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
+import android.webkit.WebChromeClient;
 import android.widget.FrameLayout;
 import android.webkit.CookieManager;
 import android.webkit.WebSettings;
@@ -22,7 +24,10 @@ import java.nio.charset.StandardCharsets;
  * Never reports delivery confirmed; DOM changes and WebView blocking must be handled.
  */
 public final class QatfahWhatsappDirect {
+ private static QatfahWhatsappDirect shared;
  private final Activity activity;
+ private FrameLayout parkedFrame;
+ private boolean inLinkScreen=false;
  private final Handler handler=new Handler(Looper.getMainLooper());
  private WebView web;
  private PluginCall pending;
@@ -30,7 +35,8 @@ public final class QatfahWhatsappDirect {
  private boolean loaded=false,injected=false,uploading=false,atRecipient=false;
  private long startedAt;
  private static final String UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
- public QatfahWhatsappDirect(Activity activity){this.activity=activity;}
+ public QatfahWhatsappDirect(Activity activity){this.activity=activity;shared=this;}
+ public static QatfahWhatsappDirect getShared(){return shared;}
  private void init() throws Exception{
   if(web!=null)return;
   try(InputStream in=activity.getAssets().open("whatsapp-direct.js")){
@@ -48,11 +54,15 @@ public final class QatfahWhatsappDirect {
   CookieManager.getInstance().setAcceptThirdPartyCookies(web,true);
   web.setAlpha(0.01f);
   ViewGroup host=activity.findViewById(android.R.id.content);
-  FrameLayout frame=new FrameLayout(activity);
-  frame.setClipChildren(true);frame.setClipToPadding(true);
+  parkedFrame=new FrameLayout(activity);
+  parkedFrame.setClipChildren(true);parkedFrame.setClipToPadding(true);
   FrameLayout.LayoutParams desktopSize=new FrameLayout.LayoutParams((int)(1100*activity.getResources().getDisplayMetrics().density),(int)(800*activity.getResources().getDisplayMetrics().density));
-  frame.addView(web,desktopSize);
-  host.addView(frame,new ViewGroup.LayoutParams(1,1));
+  parkedFrame.addView(web,desktopSize);
+  host.addView(parkedFrame,new ViewGroup.LayoutParams(1,1));
+  installWebClient();
+  web.loadUrl("https://web.whatsapp.com/");
+ }
+ private void installWebClient(){
   web.setWebViewClient(new WebViewClient(){
     @Override public void onPageFinished(WebView view,String url){
       if(!url.startsWith("https://web.whatsapp.com/"))return;
@@ -63,7 +73,37 @@ public final class QatfahWhatsappDirect {
       Uri url=request.getUrl();return !("https".equals(url.getScheme())&&"web.whatsapp.com".equals(url.getHost()));
     }
   });
-  web.loadUrl("https://web.whatsapp.com/");
+ }
+ public void ensureRunning() throws Exception {init();}
+ public WebView takeForLinking() throws Exception {
+  init();
+  if(pending!=null||inLinkScreen)return null;
+  inLinkScreen=true;
+  ViewParent old=web.getParent();
+  if(old instanceof ViewGroup)((ViewGroup)old).removeView(web);
+  return web;
+ }
+ public void returnFromLinking(WebView borrowed){
+  if(borrowed==null||borrowed!=web||parkedFrame==null)return;
+  ViewParent old=web.getParent();
+  if(old instanceof ViewGroup)((ViewGroup)old).removeView(web);
+  web.setAlpha(0.01f);
+  FrameLayout.LayoutParams desktop=new FrameLayout.LayoutParams(
+   (int)(1100*activity.getResources().getDisplayMetrics().density),
+   (int)(800*activity.getResources().getDisplayMetrics().density));
+  parkedFrame.addView(web,desktop);
+  web.setWebChromeClient(new WebChromeClient());
+  installWebClient();
+  loaded=true;atRecipient=false;inLinkScreen=false;
+  CookieManager.getInstance().flush();
+ }
+ public void getConnectionStatus(PluginCall call){
+  activity.runOnUiThread(()->{
+   if(web==null){JSObject out=new JSObject();out.put("status","not_started");call.resolve(out);return;}
+   if(inLinkScreen){JSObject out=new JSObject();out.put("status","linking");call.resolve(out);return;}
+   String js="(function(){try{if(document.querySelector('#pane-side,[data-testid=chat-list],[data-testid=chatlist-header]'))return 'connected';if(document.querySelector('[data-testid*=qr] canvas,canvas[aria-label*=QR]'))return 'not_linked';return 'connecting'}catch(e){return 'unknown'}})()";
+   web.evaluateJavascript(js,value->{JSObject out=new JSObject();out.put("status",decode(value));call.resolve(out);});
+  });
  }
  private void fail(String message){
   PluginCall call=pending;pending=null;uploading=false;
@@ -139,7 +179,7 @@ public final class QatfahWhatsappDirect {
  }
  public void send(PluginCall call){
   activity.runOnUiThread(()->{
-   if(pending!=null){call.reject("هناك محاولة إرسال قيد التنفيذ");return;}
+   if(pending!=null||inLinkScreen){call.reject("واتساب مشغول بربط الجهاز أو إرسال آخر");return;}
    try{
     pending=call;startedAt=System.currentTimeMillis();uploading=true;atRecipient=false;
     init();
