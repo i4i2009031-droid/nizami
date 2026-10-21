@@ -17,6 +17,10 @@ import android.view.Gravity;
 import android.view.View;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
+import android.webkit.ValueCallback;
+import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
+import java.io.File;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -41,6 +45,12 @@ public final class WhatsAppWebActivity extends Activity {
     private ImageView qr;
     private EditText phoneInput;
     private View phoneArea;
+    private FrameLayout webHost;
+    private LinearLayout root;
+    private String targetPhone="",targetCaption="",pdfPath="";
+    private boolean chatVisible=false;
+    private ValueCallback<Uri[]> fileCallback;
+    private static final int PICK_PDF=9205;
     private final Handler handler=new Handler(Looper.getMainLooper());
     private boolean closing=false,loaded=false,seenQr=false,pairingRequested=false;
     private final Runnable probe=new Runnable(){ @Override public void run(){
@@ -83,7 +93,10 @@ public final class WhatsAppWebActivity extends Activity {
         getWindow().getDecorView().setSystemUiVisibility(
             View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
         ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);
-        LinearLayout root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);
+        root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);
+        targetPhone=getIntent().getStringExtra("phone");if(targetPhone==null)targetPhone="";
+        targetCaption=getIntent().getStringExtra("caption");if(targetCaption==null)targetCaption="";
+        pdfPath=getIntent().getStringExtra("pdf_path");if(pdfPath==null)pdfPath="";
         root.setBackgroundColor(0xfff8fafb);
         root.setPadding(dp(18),dp(62),dp(18),dp(22));
         scroll.setOnApplyWindowInsetsListener((v,insets)->{
@@ -95,7 +108,7 @@ public final class WhatsAppWebActivity extends Activity {
         });
         scroll.addView(root);
         TextView title=text("قطفة • ربط واتساب",24,0xff104c42,true);root.addView(title,lp(-1,60));
-        TextView subtitle=text("شاشة الباركود والرمز فقط",14,0xff54746b,false);root.addView(subtitle,lp(-1,35));
+        TextView subtitle=text("ربط واتساب ومحادثاته داخل قطفة",14,0xff54746b,false);root.addView(subtitle,lp(-1,35));
         status=text("🔴 يتم فحص خدمة واتساب…",15,0xff975244,true);status.setBackground(bg(0xffeef4ef,20));
         LinearLayout.LayoutParams sp=lp(-1,58);sp.topMargin=18;root.addView(status,sp);
         FrameLayout qrCard=new FrameLayout(this);qrCard.setBackground(bg(Color.WHITE,dp(18)));
@@ -137,9 +150,9 @@ public final class WhatsAppWebActivity extends Activity {
         phoneInput=new EditText(this);phoneInput.setSingleLine(true);phoneInput.setHint("رقم الهاتف مع مفتاح الدولة 967…");
         phoneInput.setInputType(InputType.TYPE_CLASS_PHONE);inputs.addView(phoneInput,lp(-1,58));
         inputs.addView(button("طلب رمز ربط الهاتف",this::requestPairingCode),lp(-1,dp(54)));
-        TextView warning=text("قد يتعذر إظهار QR أو رمز الاقتران لأن واتساب لا يوفر واجهة عامة لهذا الاستخدام. لن تُفتح محادثاتك داخل قطفة ولن تُقرأ الرسائل.",11,0xff718681,false);
+        TextView warning=text("بعد الربط يمكنك فتح المحادثة داخل قطفة وإرسال الرسالة أو رفع PDF من زر المرفقات داخل واتساب. لا يمكن ضمان التشغيل لأن WhatsApp Web قد يرفض WebView.",11,0xff718681,false);
         warning.setPadding(8,18,8,6);root.addView(warning,lp(-1,-2));
-        TextView external=button("فتح واتساب الرسمي عند التعذر",this::openOfficialSite);
+        TextView external=button("فتح المحادثات داخل قطفة",this::showChat);
         LinearLayout.LayoutParams ex=lp(-1,dp(54));ex.topMargin=dp(14);root.addView(external,ex);
         LinearLayout.LayoutParams back=lp(-1,dp(50));back.topMargin=dp(8);
         root.addView(button("العودة إلى قطفة",this::finish),back);
@@ -153,7 +166,17 @@ public final class WhatsAppWebActivity extends Activity {
         s.setUseWideViewPort(true);s.setLoadWithOverviewMode(true);s.setSupportMultipleWindows(false);
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(hiddenWeb,true);
-        hiddenWeb.setWebChromeClient(new WebChromeClient());
+        hiddenWeb.setWebChromeClient(new WebChromeClient(){
+            @Override public boolean onShowFileChooser(WebView view,ValueCallback<Uri[]> callback,FileChooserParams params){
+                if(fileCallback!=null)fileCallback.onReceiveValue(null);
+                fileCallback=callback;
+                try{
+                    Intent picker=new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                    picker.addCategory(Intent.CATEGORY_OPENABLE);picker.setType("application/pdf");
+                    startActivityForResult(picker,PICK_PDF);return true;
+                }catch(Exception e){fileCallback=null;callback.onReceiveValue(null);return true;}
+            }
+        });
         hiddenWeb.setWebViewClient(new WebViewClient(){
             @Override public void onPageFinished(WebView view,String u){loaded=true;readPairingState();}
             @Override public boolean shouldOverrideUrlLoading(WebView w, WebResourceRequest r){
@@ -164,7 +187,7 @@ public final class WhatsAppWebActivity extends Activity {
         });
         // A clipped one-pixel host hides the WebView, while its measured content
         // viewport stays desktop sized so the login canvas can be rendered.
-        FrameLayout webHost=new FrameLayout(this);
+        webHost=new FrameLayout(this);
         webHost.setClipChildren(true);webHost.setClipToPadding(true);
         webHost.addView(hiddenWeb,new FrameLayout.LayoutParams(dp(1150),dp(820)));
         root.addView(webHost,lp(dp(1),dp(1)));
@@ -194,7 +217,8 @@ public final class WhatsAppWebActivity extends Activity {
                 JSONObject obj=new JSONObject(unwrapped);
                 if(obj.optBoolean("connected")){
                     setStatus("متصل بهذه الجلسة في الوقت الحالي",true);
-                    hint.setText("تم رصد شاشة واتساب المسجلة. إرسال PDF من قطفة يظل عبر مشاركة واتساب الأصلية.");
+                    hint.setText("واتساب مرتبط. افتح المحادثات من الزر أدناه واستخدم زر إرسال واتساب نفسه.");
+                    if(!targetPhone.isEmpty())showChat();
                     qr.setImageDrawable(null);pairingCode.setText("تم الربط");return;
                 }
                 String image=obj.optString("qr","");
@@ -252,8 +276,51 @@ public final class WhatsAppWebActivity extends Activity {
             }
         });
     }
+
+    private void showChat(){
+        if(hiddenWeb==null)return;
+        if(chatVisible)return;
+        chatVisible=true;
+        root.removeView(webHost);
+        root.removeAllViews();
+        root.setPadding(0,dp(24),0,0);
+        LinearLayout controls=new LinearLayout(this);
+        controls.setOrientation(LinearLayout.VERTICAL);
+        controls.setPadding(dp(12),dp(9),dp(12),dp(9));
+        controls.addView(button("العودة إلى قطفة",this::finish),lp(-1,dp(46)));
+        TextView notice=text("المحادثة داخل قطفة: أكد الإرسال بنفسك. لإرفاق PDF استخدم مشبك الملفات داخل واتساب.",12,0xff326353,false);
+        controls.addView(notice,lp(-1,dp(46)));
+        if(!pdfPath.isEmpty()){
+           TextView pdfNotice=button("ملف PDF جاهز • اختره عند ظهور منتقي المرفقات",()->{
+               new AlertDialog.Builder(this).setMessage("اضغط مشبك المرفقات داخل واتساب ثم اختر ملف PDF الذي جهزته قطفة. إذا تعذر رفعه داخل WebView فلا يمكن تأكيد الإرسال.").setPositiveButton("حسنًا",null).show();
+           });
+           controls.addView(pdfNotice,lp(-1,dp(50)));
+        }
+        root.addView(controls,lp(-1,-2));
+        hiddenWeb.setAlpha(1f);
+        hiddenWeb.setVisibility(View.VISIBLE);
+        webHost.removeView(hiddenWeb);
+        webHost.addView(hiddenWeb,new FrameLayout.LayoutParams(-1,-1));
+        LinearLayout.LayoutParams fill=new LinearLayout.LayoutParams(-1,0,1);
+        root.addView(webHost,fill);
+        handler.removeCallbacks(probe);
+        if(!targetPhone.isEmpty()){
+           String url="https://web.whatsapp.com/send?phone="+Uri.encode(targetPhone);
+           if(!targetCaption.isEmpty())url+="&text="+Uri.encode(targetCaption);
+           hiddenWeb.loadUrl(url);
+           targetPhone="";
+        }
+    }
+    @Override protected void onActivityResult(int requestCode,int resultCode,Intent data){
+        super.onActivityResult(requestCode,resultCode,data);
+        if(requestCode==PICK_PDF&&fileCallback!=null){
+            Uri selected=resultCode==RESULT_OK&&data!=null?data.getData():null;
+            fileCallback.onReceiveValue(selected==null?null:new Uri[]{selected});
+            fileCallback=null;
+        }
+    }
     @Override protected void onPause(){CookieManager.getInstance().flush();super.onPause();}
-    @Override protected void onDestroy(){closing=true;handler.removeCallbacksAndMessages(null);
+    @Override protected void onDestroy(){if(fileCallback!=null){fileCallback.onReceiveValue(null);fileCallback=null;}closing=true;handler.removeCallbacksAndMessages(null);
         if(hiddenWeb!=null){hiddenWeb.stopLoading();hiddenWeb.destroy();hiddenWeb=null;}
         super.onDestroy();
     }
