@@ -6,6 +6,8 @@ import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getWhatsappStatus,getWhatsappQr,getWhatsappPairingCode,sendWhatsappMessage,sendWhatsappDocument } from './whatsapp.mjs';
+import {cloudSender} from './whatsapp-cloud.mjs';
+const cloudDispatch=cloudSender({accounts:process.env.QATFAH_WA_CLOUD_ACCOUNTS||'{}'});
 import {googleDrive,driveConfigured} from './google-drive.mjs';
 
 const PORT = Number(process.env.QATFAH_PORT || 5059);
@@ -139,7 +141,7 @@ export function createApp(){return createServer(async(req,res)=>{
      if(req.method==='GET'&&path==='/api/whatsapp/status'){response(res,200,{status:await getWhatsappStatus(tenant)});return;}
      if(req.method==='GET'&&path==='/api/whatsapp/qr'){response(res,200,await getWhatsappQr(tenant));return;}
      if(req.method==='POST'&&path==='/api/whatsapp/pair'){const b=await bodyJson(req);response(res,200,await getWhatsappPairingCode(tenant,str(b.phone,18)));return;}
-     if(req.method==='POST'&&path==='/api/whatsapp/send-document'){const b=await bodyJson(req,8_000_000);response(res,200,await sendWhatsappDocument(tenant,str(b.phone,18),str(b.filename,120),b.base64,str(b.caption,500)));return;}
+     if(req.method==='POST'&&path==='/api/whatsapp/send-document'){const b=await bodyJson(req,8_000_000);const input={tenantId:tenant,phone:str(b.phone,18),filename:str(b.filename,120),base64:b.base64,caption:str(b.caption,500)};const result=await cloudDispatch(input);response(res,200,result.status==='unavailable'?await sendWhatsappDocument(tenant,input.phone,input.filename,input.base64,input.caption):result);return;}
      if(req.method==='POST'&&path==='/api/whatsapp/send'){const b=await bodyJson(req);response(res,200,await sendWhatsappMessage(tenant,str(b.phone,18),str(b.text,5000)));return;}
    }
    throw httpError(404,'NOT_FOUND','المسار غير موجود');
