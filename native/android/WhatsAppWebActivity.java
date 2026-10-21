@@ -252,7 +252,7 @@ public final class WhatsAppWebActivity extends Activity {
                 if(image.startsWith("data:image/png;base64,")&&image.length()<500_000){
                     byte[] decoded=Base64.decode(image.substring(image.indexOf(',')+1),Base64.DEFAULT);
                     Bitmap bmp=BitmapFactory.decodeByteArray(decoded,0,decoded.length);
-                    if(bmp!=null){qr.setImageBitmap(bmp);seenQr=true;setStatus("غير متصل • امسح الباركود",false);
+                    if(bmp!=null){qr.setImageBitmap(bmp);qrPlaceholder.setVisibility(View.GONE);seenQr=true;setStatus("يلزم ربط واتساب • امسح الباركود",false);
                         hint.setText("من واتساب في هاتفك: الأجهزة المرتبطة ← ربط جهاز، ثم امسح الرمز.");}
                 }
                 String code=obj.optString("code","");
