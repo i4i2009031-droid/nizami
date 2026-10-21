@@ -211,21 +211,45 @@ public final class WhatsAppWebActivity extends Activity {
         });
     }
     private void requestPairingCode(){
-        if(hiddenWeb==null||!loaded){hint.setText("انتظر تحميل واتساب أولًا");return;}
+        if(hiddenWeb==null||!loaded){hint.setText("انتظر تحميل واتساب أولاً، ثم حاول مجددًا.");return;}
         String phone=phoneInput.getText().toString().replaceAll("[^0-9]","");
-        if(phone.length()<9||phone.length()>15){hint.setText("أدخل رقمًا صحيحًا مع مفتاح الدولة");return;}
-        // Run only from direct user tap, on the unpaired login page. Never touch chats or send messages.
-        String argument=JSONObject.quote(phone);
+        if(phone.length()<9||phone.length()>15){hint.setText("أدخل الرقم مع مفتاح الدولة، مثل 9677XXXXXXXX");return;}
+        pairingRequested=true;
+        pairingCode.setText("رمز الربط\\nيتم طلب الرمز من واتساب…");
+        hint.setText("يتم فتح خيار الربط بالرقم. قد يستغرق ظهور الرمز عدة ثوان.");
+        // WhatsApp controls the pairing workflow. Open its phone-link choice first;
+        // input and submit are separate, to wait for React to render the field.
+        String open="(function(){var buttons=[...document.querySelectorAll('button,[role=button]')];"+
+          "var b=buttons.find(x=>/link with phone|phone number|رقم الهاتف|ربط.*رقم/i.test(x.innerText||x.textContent||''));"+
+          "if(b){b.click();return 'opened'}return 'unavailable'})()";
+        hiddenWeb.evaluateJavascript(open,v->handler.postDelayed(()->fillPairingPhone(phone,0),1600));
+    }
+    private void fillPairingPhone(String phone,int attempt){
+        if(closing||hiddenWeb==null||!pairingRequested)return;
+        String arg=JSONObject.quote(phone);
         String script="(function(){try{"+
-            "if(document.querySelector('[data-testid=chat-list],#pane-side'))return false;"+
-            "var b=[...document.querySelectorAll('button,[role=button]')].find(x=>/link with phone|phone number|رقم الهاتف/i.test(x.textContent||''));"+
-            "if(b)b.click();var i=document.querySelector('input[type=tel],input[aria-label*=phone],input[inputmode=tel]');"+
-            "if(!i)return false;i.focus();i.value="+argument+";i.dispatchEvent(new Event('input',{bubbles:true}));"+
-            "var next=[...document.querySelectorAll('button,[role=button]')].find(x=>/next|التالي|continue/i.test(x.textContent||''));"+
-            "if(next)next.click();return true;}catch(e){return false}})()";
+          "var input=document.querySelector('input[type=tel],input[inputmode=tel],input[autocomplete=tel]');"+
+          "if(!input)return 'waiting';"+
+          "var setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;"+
+          "setter.call(input,"+arg+");input.dispatchEvent(new Event('input',{bubbles:true}));"+
+          "input.dispatchEvent(new Event('change',{bubbles:true}));"+
+          "var next=[...document.querySelectorAll('button,[role=button]')].find(x=>/next|التالي|continue|متابعة/i.test(x.innerText||x.textContent||''));"+
+          "if(next&&!next.disabled){next.click();return 'submitted'}return 'entered';"+
+          "}catch(e){return 'unavailable'}})()";
         hiddenWeb.evaluateJavascript(script,value->{
-            hint.setText("تمت محاولة طلب الرمز. إن لم يظهر رمز الربط، فصفحة واتساب الحالية لا تسمح بهذه الطريقة المدمجة.");
-            handler.postDelayed(this::readPairingState,1800);
+            if(closing||!pairingRequested)return;
+            if(value.contains("waiting")&&attempt<6){
+                handler.postDelayed(()->fillPairingPhone(phone,attempt+1),1200);
+                return;
+            }
+            if(value.contains("submitted")){
+                hint.setText("تم طلب الرمز. انتظر ظهوره في الحقل أعلاه.");
+                handler.postDelayed(this::readPairingState,1800);
+            }else{
+                pairingRequested=false;
+                pairingCode.setText("رمز الربط\\nلم تصدر الجلسة رمزًا");
+                hint.setText("لم تسمح صفحة واتساب المدمجة بإكمال الربط بالرقم. استخدم خيار واتساب الرسمي.");
+            }
         });
     }
     @Override protected void onPause(){CookieManager.getInstance().flush();super.onPause();}
