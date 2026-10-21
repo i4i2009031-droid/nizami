@@ -1,4 +1,4 @@
-name: Qatfah Android APKs and Web (testing)
+name: Qatfah Android APKs and Web
 on:
   workflow_dispatch:
   push:
@@ -11,7 +11,7 @@ permissions:
   contents: write
 jobs:
   android:
-    name: Android ${{ matrix.app }} debug APK
+    name: Android ${{ matrix.app }} APK
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -37,6 +37,7 @@ jobs:
           node --check apps/client/js/app.js
           node --check apps/client/js/ledger.js
           node --check apps/client/js/pdf.js
+          node --check native/android/whatsapp-direct.js
           node --check server/index.mjs
           npm test
       - name: Prepare web assets
@@ -50,33 +51,75 @@ jobs:
           node scripts/prep-capacitor.mjs ${{ matrix.app }}
           npx cap add android
           npx cap sync android
-      - name: Install native Android document picker and WhatsApp Web screen
+      - name: Install native Android document picker and persistent WhatsApp engine
         run: node scripts/inject-android.mjs ${{ matrix.app }}
       - name: Install native launcher icons
         run: |
           python3 -m pip install --quiet pillow
           python3 scripts/android_assets.py ${{ matrix.app }}
-      - name: Build test APK
+      - name: Select signing mode and set APK versions
+        id: configure
+        env:
+          QATFAH_KEYSTORE_BASE64: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && secrets.QATFAH_KEYSTORE_BASE64 || '' }}
+          QATFAH_KEYSTORE_PASSWORD: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && secrets.QATFAH_KEYSTORE_PASSWORD || '' }}
+          QATFAH_KEY_ALIAS: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && secrets.QATFAH_KEY_ALIAS || '' }}
+          QATFAH_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && secrets.QATFAH_KEY_PASSWORD || '' }}
+        run: node scripts/configure-android-build.mjs ${{ matrix.app }}
+      - name: Build debug test APK
+        if: steps.configure.outputs.mode == 'debug'
         run: |
           cd android
           chmod +x gradlew
           ./gradlew --no-daemon --stacktrace assembleDebug
-      - name: Verify and name the output
+      - name: Build owner-signed release APK
+        if: steps.configure.outputs.mode == 'release' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          QATFAH_KEYSTORE_FILE: ${{ steps.configure.outputs.keystore_file }}
+          QATFAH_KEYSTORE_PASSWORD: ${{ secrets.QATFAH_KEYSTORE_PASSWORD }}
+          QATFAH_KEY_ALIAS: ${{ secrets.QATFAH_KEY_ALIAS }}
+          QATFAH_KEY_PASSWORD: ${{ secrets.QATFAH_KEY_PASSWORD }}
         run: |
-          test -s android/app/build/outputs/apk/debug/app-debug.apk
-          cp android/app/build/outputs/apk/debug/app-debug.apk qatfah-${{ matrix.app }}.apk
-          sha256sum qatfah-${{ matrix.app }}.apk
+          cd android
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+      - name: Verify signature, name APK and record SHA256
+        env:
+          QATFAH_BUILD_MODE: ${{ steps.configure.outputs.mode }}
+          QATFAH_APP: ${{ matrix.app }}
+        run: |
+          qatfah_apk_path="android/app/build/outputs/apk/${QATFAH_BUILD_MODE}/app-${QATFAH_BUILD_MODE}.apk"
+          test -s "$qatfah_apk_path"
+          cp "$qatfah_apk_path" "qatfah-${QATFAH_APP}.apk"
+          qatfah_sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$qatfah_sdk_root"
+          qatfah_apksigner="$(printf '%s\n' "$qatfah_sdk_root"/build-tools/*/apksigner | sort -V | tail -n 1)"
+          test -x "$qatfah_apksigner"
+          "$qatfah_apksigner" verify --verbose --print-certs "qatfah-${QATFAH_APP}.apk"
+          printf 'Signature verification: passed (Android SDK apksigner)\n' >> "Qatfah-build-info-${QATFAH_APP}.txt"
+          qatfah_digest="$(sha256sum "qatfah-${QATFAH_APP}.apk")"
+          printf 'APK SHA256: %s\n' "$qatfah_digest" | tee -a "Qatfah-build-info-${QATFAH_APP}.txt"
       - uses: actions/upload-artifact@v7
         with:
           name: qatfah-${{ matrix.app }}
-          path: qatfah-${{ matrix.app }}.apk
+          path: |
+            qatfah-${{ matrix.app }}.apk
+            Qatfah-build-info-${{ matrix.app }}.txt
           if-no-files-found: error
+      - name: Remove temporary signing keystore
+        if: always()
+        env:
+          QATFAH_KEYSTORE_FILE: ${{ steps.configure.outputs.keystore_file }}
+        run: |
+          if [ -n "$QATFAH_KEYSTORE_FILE" ]; then
+            rm -f -- "$QATFAH_KEYSTORE_FILE"
+            rmdir -- "$(dirname "$QATFAH_KEYSTORE_FILE")"
+          fi
       - name: Build diagnostics
         if: failure()
         run: |
           node --version
           java -version
-          ls -lah android/app/build/outputs/apk/debug || true
+          ls -lah android/app/build/outputs/apk || true
   release:
     needs: [android]
     if: github.event_name != 'pull_request'
@@ -86,20 +129,37 @@ jobs:
         with:
           path: release-files
           merge-multiple: true
-      - name: Confirm both APKs exist
+      - name: Confirm both APKs and build metadata exist
         run: |
           test -s release-files/qatfah-client.apk
           test -s release-files/qatfah-admin.apk
-          ls -lh release-files/*.apk
-      - name: Upload test APKs to GitHub Releases
+          test -s release-files/Qatfah-build-info-client.txt
+          test -s release-files/Qatfah-build-info-admin.txt
+      - name: Publish APKs with their actual signing mode
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "qatfah-test-${{ github.run_number }}" release-files/*.apk \
+          qatfah_client_mode="$(sed -n 's/^Build mode: //p' release-files/Qatfah-build-info-client.txt)"
+          qatfah_admin_mode="$(sed -n 's/^Build mode: //p' release-files/Qatfah-build-info-admin.txt)"
+          test "$qatfah_client_mode" = "$qatfah_admin_mode"
+          if [ "$qatfah_client_mode" = 'release' ]; then
+            qatfah_tag="qatfah-release-${{ github.run_number }}"
+            qatfah_title="Qatfah signed release APKs ${{ github.run_number }}"
+            printf '%s\n\n' 'RELEASE APKs signed with the configured owner key. Signing and APK integrity are verified; device and deployment acceptance remain required.' > release-notes.txt
+          elif [ "$qatfah_client_mode" = 'debug' ]; then
+            qatfah_tag="qatfah-test-${{ github.run_number }}"
+            qatfah_title="Qatfah DEBUG test APKs ${{ github.run_number }}"
+            printf '%s\n\n' 'DEBUG TEST APKs. An owner release signing key was not used. These files are for evaluation and must not be represented as production-signed APKs.' > release-notes.txt
+          else
+            printf '%s\n' 'Unknown signing mode; refusing to publish.' >&2
+            exit 1
+          fi
+          cat release-files/Qatfah-build-info-client.txt release-files/Qatfah-build-info-admin.txt >> release-notes.txt
+          gh release create "$qatfah_tag" release-files/*.apk release-files/Qatfah-build-info-*.txt \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "Qatfah test APKs ${{ github.run_number }}" \
-            --notes "DEBUG APKs for internal evaluation, not production-signed or certified. Local SAF backups and PDF share require no external developer services. WhatsApp Web embedding is best-effort and may be blocked by WhatsApp. GitHub admin write requires authorizing GitHub once."
+            --title "$qatfah_title" \
+            --notes-file release-notes.txt
   web:
     runs-on: ubuntu-24.04
     steps:

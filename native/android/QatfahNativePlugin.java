@@ -2,6 +2,8 @@ package com.qatfah.accounting;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.net.Uri;
 import android.util.Base64;
 import java.io.File;
@@ -18,65 +20,119 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 
 @CapacitorPlugin(name="QatfahNative")
 public class QatfahNativePlugin extends Plugin {
   private static final int MAX_BYTES=40*1024*1024;
 
-  @PluginMethod public void startWhatsAppSession(PluginCall call){
-    getActivity().runOnUiThread(()->{try{if(direct==null)direct=new QatfahWhatsappDirect(getActivity());direct.ensureRunning();call.resolve();}catch(Exception e){call.reject("تعذر تشغيل واتساب المدمج",e);}});
-  }
-  @PluginMethod public void whatsappConnectionStatus(PluginCall call){
-    if(direct==null){JSObject out=new JSObject();out.put("status","not_started");call.resolve(out);return;}
-    direct.getConnectionStatus(call);
-  }
-  @PluginMethod public void whatsappShowBrowser(PluginCall call){
-    if(direct==null)direct=new QatfahWhatsappDirect(getActivity());
-    direct.showPairingPage(call);
-  }
-  @PluginMethod public void whatsappHideBrowser(PluginCall call){
-    if(direct==null){call.resolve();return;}
-    direct.hidePairingPage(call);
-  }
-  @PluginMethod public void whatsappRetryBrowser(PluginCall call){
-    if(direct==null)direct=new QatfahWhatsappDirect(getActivity());
-    direct.retryLoading(call);
-  }
-  @PluginMethod public void whatsappPairingStatus(PluginCall call){
-    if(direct==null)direct=new QatfahWhatsappDirect(getActivity());
-    direct.pairingStatus(call);
-  }
-  @PluginMethod public void whatsappPairingPhone(PluginCall call){
-    if(direct==null)direct=new QatfahWhatsappDirect(getActivity());
-    direct.pairingPhone(call,call.getString("phone",""));
-  }
-  @PluginMethod public void openWhatsAppWeb(PluginCall call) {
+  private interface EngineAction { void run(QatfahWhatsappDirect engine) throws Exception; }
+  private void withEngine(PluginCall call, EngineAction action) {
+    if(getActivity()==null){call.reject("شاشة التطبيق غير متاحة");return;}
     getActivity().runOnUiThread(()->{
-      try {
-        if(direct==null)direct=new QatfahWhatsappDirect(getActivity());
-        direct.ensureRunning();
-        getActivity().startActivity(new Intent(getActivity(),WhatsAppWebActivity.class));
-        call.resolve();
-      } catch(Exception ex) { call.reject("تعذر فتح جلسة واتساب المدمجة",ex); }
+      try { action.run(QatfahWhatsappDirect.forActivity(getActivity())); }
+      catch(Exception e) { call.reject("تعذر الوصول إلى جلسة واتساب المدمجة",e); }
     });
   }
+  @PluginMethod public void startWhatsAppSession(PluginCall call){
+    withEngine(call,engine->{engine.ensureRunning();call.resolve();});
+  }
+  @PluginMethod public void whatsappConnectionStatus(PluginCall call){
+    withEngine(call,engine->engine.getConnectionStatus(call));
+  }
+  @PluginMethod public void whatsappShowBrowser(PluginCall call){
+    call.reject("الربط داخل قطفة متاح بالباركود أو رمز الهاتف فقط");
+  }
+  @PluginMethod public void whatsappHideBrowser(PluginCall call){ call.resolve(); }
+  @PluginMethod public void whatsappRetryBrowser(PluginCall call){
+    withEngine(call,engine->engine.retryLoading(call));
+  }
+  @PluginMethod public void whatsappPairingStatus(PluginCall call){
+    withEngine(call,engine->engine.pairingStatus(call));
+  }
+  @PluginMethod public void whatsappPairingPhone(PluginCall call){
+    withEngine(call,engine->engine.pairingPhone(call,call.getString("phone","")));
+  }
+  @PluginMethod public void whatsappLogout(PluginCall call){
+    withEngine(call,engine->engine.logout(call));
+  }
+  @PluginMethod public void openWhatsAppWeb(PluginCall call) {
+    call.reject("الربط داخل قطفة متاح بالباركود أو رمز الهاتف فقط");
+  }
 
-  private QatfahWhatsappDirect direct;
-  @PluginMethod public void sendWhatsAppInApp(PluginCall call) {
+  private boolean validWhatsAppPayload(PluginCall call) {
     String phone=call.getString("phone","");
     String caption=call.getString("caption","");
     String base64=call.getString("base64","");
     String filename=call.getString("filename","Qatfah.pdf");
-    if(!phone.matches("[0-9]{9,15}")){call.reject("رقم المستلم غير صالح");return;}
-    if(caption.length()>3000||filename.length()>120||base64.length()>7000000){call.reject("الملف أو الرسالة غير صالح");return;}
+    if(!phone.matches("[0-9]{9,15}")){call.reject("رقم المستلم غير صالح");return false;}
+    if(caption.length()>3000||filename.length()>120||base64.length()>7000000){call.reject("الملف أو الرسالة غير صالح");return false;}
+    if(base64.isEmpty()&&caption.trim().isEmpty()){call.reject("لا توجد رسالة أو مستند للإرسال");return false;}
     if(!base64.isEmpty()){
       try{
-        byte[] header=Base64.decode(base64.substring(0,Math.min(16,base64.length())),Base64.DEFAULT);
-        if(header.length<5||!new String(header,0,5,StandardCharsets.US_ASCII).equals("%PDF-")){call.reject("يجب اختيار ملف PDF صحيح");return;}
-      }catch(Exception e){call.reject("ملف PDF غير صالح");return;}
+        byte[] pdf=Base64.decode(base64,Base64.DEFAULT);
+        if(pdf.length<5||pdf.length>5000000||!new String(pdf,0,5,StandardCharsets.US_ASCII).equals("%PDF-")){
+          call.reject("يجب اختيار ملف PDF صحيح لا يتجاوز 5 ميجابايت");return false;
+        }
+      }catch(Exception e){call.reject("ملف PDF غير صالح");return false;}
     }
-    if(direct==null)direct=new QatfahWhatsappDirect(getActivity());
-    direct.send(call);
+    return true;
+  }
+  @PluginMethod public void sendWhatsAppInApp(PluginCall call) {
+    if(!validWhatsAppPayload(call))return;
+    withEngine(call,engine->engine.send(call));
+  }
+
+  /** Explicit fallback only. Opening WhatsApp is not an acknowledgement of sending. */
+  @PluginMethod public void sendWhatsAppIntent(PluginCall call) {
+    if(!validWhatsAppPayload(call))return;
+    if(getActivity()==null){call.reject("شاشة التطبيق غير متاحة");return;}
+    getActivity().runOnUiThread(()->{
+      File attachment=null;
+      try {
+        String phone=call.getString("phone","");
+        String caption=call.getString("caption","");
+        String base64=call.getString("base64","");
+        Intent intent=new Intent(Intent.ACTION_SEND);
+        intent.putExtra("jid",phone+"@s.whatsapp.net");
+        intent.putExtra(Intent.EXTRA_TEXT,caption);
+        if(!base64.isEmpty()){
+          File root=new File(getContext().getCacheDir(),"wa-attachments");
+          File directory=new File(root,UUID.randomUUID().toString());
+          if(!directory.mkdirs())throw new IllegalStateException("Attachment directory unavailable");
+          String name=call.getString("filename","Qatfah.pdf").replaceAll("[\\\\/\\x00-\\x1F]","_").trim();
+          if(name.isEmpty())name="Qatfah.pdf";
+          if(!name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf"))name+=".pdf";
+          attachment=new File(directory,name);
+          try(FileOutputStream output=new FileOutputStream(attachment)){
+            output.write(Base64.decode(base64,Base64.DEFAULT));output.flush();
+          }
+          Uri uri=FileProvider.getUriForFile(getContext(),getContext().getPackageName()+".waattachments",attachment);
+          intent.setType("application/pdf");
+          intent.putExtra(Intent.EXTRA_STREAM,uri);
+          intent.setClipData(ClipData.newRawUri("PDF",uri));
+          intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } else intent.setType("text/plain");
+        intent.setPackage("com.whatsapp");
+        try { getActivity().startActivity(intent); }
+        catch(ActivityNotFoundException missingPersonal) {
+          intent.setPackage("com.whatsapp.w4b");
+          getActivity().startActivity(intent);
+        }
+        JSObject out=new JSObject();
+        out.put("status","fallback_opened");out.put("openedInWhatsApp",true);
+        out.put("submitted",false);out.put("dispatched",false);out.put("deliveryConfirmed",false);
+        out.put("safeToFallback",false);
+        out.put("message",base64.isEmpty()?"فُتح واتساب بالرسالة للمراجعة والإرسال":"فُتح واتساب بالمستند للمراجعة والإرسال");
+        call.resolve(out);
+      } catch(ActivityNotFoundException missing) {
+        if(attachment!=null){attachment.delete();attachment.getParentFile().delete();}
+        call.reject("تطبيق واتساب غير مثبت على هذا الجهاز");
+      } catch(Exception e) {
+        if(attachment!=null){attachment.delete();attachment.getParentFile().delete();}
+        call.reject("تعذر فتح واتساب بالمستند",e);
+      }
+    });
   }
 
   @PluginMethod public void saveJson(PluginCall call) {
