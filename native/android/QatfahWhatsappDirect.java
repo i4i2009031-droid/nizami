@@ -80,7 +80,7 @@ public final class QatfahWhatsappDirect {
  /** The QR screen observes the same WebView without detaching or reloading it. */
  public WebView takeForLinking() throws Exception {
   init();
-  if(pending!=null||inLinkScreen)return null;
+  if(pending!=null)return null;
   inLinkScreen=true;
   return web;
  }
