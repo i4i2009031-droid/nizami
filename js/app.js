@@ -363,12 +363,14 @@ function openWhatsapp(){
  <h3 id="wa-root-state">جاري فحص الجلسة...</h3>
  <div id="wa-root-connected" hidden><p>واتساب متصل بالنظام. يمكنك فتح أي قسم وإرسال المستندات.</p></div>
  <div id="wa-root-qr"><div style="min-height:210px;display:grid;place-items:center"><img id="wa-root-qr-image" hidden alt="رمز QR لواتساب" style="width:min(100%,260px);height:auto"/><p id="wa-root-qr-note">جاري تحميل الباركود...</p></div>
- <button id="wa-root-switch-phone" type="button" class="btn btn-primary btn-block">الربط برقم الهاتف والرمز</button></div>
+ <button id="wa-root-browser" type="button" class="btn btn-primary btn-block">عرض باركود واتساب مباشرة</button><button id="wa-root-retry" type="button" class="btn btn-light btn-block">إعادة تحميل واتساب</button><button id="wa-root-switch-phone" type="button" class="btn btn-light btn-block">الربط برقم الهاتف والرمز</button></div>
  <div id="wa-root-phone" hidden><label>رقم واتساب مع مفتاح اليمن +967<input id="wa-root-number" type="tel" inputmode="numeric" dir="ltr" placeholder="+9677XXXXXXXX"></label>
  <button id="wa-root-request" type="button" class="btn btn-primary btn-block">طلب رمز الربط</button>
  <div id="wa-root-code" dir="ltr" style="font-size:27px;letter-spacing:5px;font-weight:bold;text-align:center;padding:18px">···· ····</div>
  <button id="wa-root-switch-qr" type="button" class="btn btn-light btn-block">العودة للباركود</button></div>
  </div>`);
+ $('wa-root-browser').onclick=async()=>{try{await window.Capacitor.Plugins.QatfahNative.whatsappShowBrowser();}catch(e){toast(e.message);}};
+ $('wa-root-retry').onclick=async()=>{try{await window.Capacitor.Plugins.QatfahNative.whatsappRetryBrowser();toast('يجري تحديث صفحة واتساب');}catch(e){toast(e.message);}};
  $('wa-root-switch-phone').onclick=()=>{waMode='phone';$('wa-root-qr').hidden=true;$('wa-root-phone').hidden=false;};
  $('wa-root-switch-qr').onclick=()=>{waMode='qr';$('wa-root-phone').hidden=true;refreshWaPairing();};
  $('wa-root-request').onclick=async()=>{
