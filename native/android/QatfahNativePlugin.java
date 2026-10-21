@@ -3,6 +3,9 @@ package com.qatfah.accounting;
 import android.app.Activity;
 import android.content.Intent;
 import android.net.Uri;
+import java.io.File;
+import java.io.FileOutputStream;
+import androidx.core.content.FileProvider;
 import androidx.activity.result.ActivityResult;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -22,6 +25,36 @@ public class QatfahNativePlugin extends Plugin {
   @PluginMethod public void openWhatsAppWeb(PluginCall call) {
     try { getActivity().startActivity(new Intent(getActivity(),WhatsAppWebActivity.class));call.resolve(); }
     catch(Exception ex) { call.reject("تعذر فتح واتساب ويب",ex); }
+  }
+
+  /** Opens the embedded WhatsApp Web session; no Android Sharesheet or external WhatsApp app. */
+  @PluginMethod public void sendWhatsAppInApp(PluginCall call) {
+    String phone=call.getString("phone","");
+    String caption=call.getString("caption","");
+    String base64=call.getString("base64","");
+    String filename=call.getString("filename","Qatfah.pdf");
+    if(!phone.matches("[0-9]{9,15}")){call.reject("رقم المستلم غير صالح");return;}
+    if(caption.length()>3000||filename.length()>120){call.reject("محتوى طويل");return;}
+    try {
+      Intent intent=new Intent(getActivity(),WhatsAppWebActivity.class);
+      intent.putExtra("phone",phone);intent.putExtra("caption",caption);
+      if(!base64.isEmpty()) {
+        byte[] bytes=Base64.decode(base64,Base64.DEFAULT);
+        if(bytes.length>5_000_000||bytes.length<5||!(new String(bytes,0,5,StandardCharsets.US_ASCII).equals("%PDF-"))){call.reject("ملف PDF غير صالح أو كبير");return;}
+        String safeName=filename.replaceAll("[^a-zA-Z0-9_.-]","_");
+        if(!safeName.toLowerCase().endsWith(".pdf"))safeName+=".pdf";
+        File folder=new File(getContext().getCacheDir(),"wa-attachments");
+        if(!folder.exists()&&!folder.mkdirs())throw new IllegalStateException("Cannot create cache folder");
+        File pdf=new File(folder,safeName);
+        try(FileOutputStream out=new FileOutputStream(pdf)){out.write(bytes);}
+        intent.putExtra("pdf_path",pdf.getAbsolutePath());
+        intent.putExtra("pdf_name",safeName);
+      }
+      getActivity().startActivity(intent);
+      JSObject result=new JSObject();result.put("opened",true);result.put("sent",false);
+      result.put("message","تم فتح المحادثة داخل قطفة؛ يرجى تأكيد الإرسال داخل واتساب.");
+      call.resolve(result);
+    }catch(Exception ex){call.reject("تعذر فتح الإرسال الداخلي",ex);}
   }
 
   @PluginMethod public void saveJson(PluginCall call) {
