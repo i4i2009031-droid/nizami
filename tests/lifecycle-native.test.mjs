@@ -41,10 +41,13 @@ test('Android injection copies the actual MainActivity and hidden engine, remove
     fs.writeFileSync(path.join(destination,'MainActivity.java'),'old generated stub');
     fs.writeFileSync(path.join(destination,'WhatsAppWebActivity.java'),'legacy visible activity');
     const manifest=path.join(app,'AndroidManifest.xml');
-    fs.writeFileSync(manifest,'<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application><activity android:name=".MainActivity"/><activity android:name=".WhatsAppWebActivity" android:exported="false"/><service android:name=".KeepThisService"/></application></manifest>');
+    // Capacitor already supplies a FileProvider. Its existence must not suppress
+    // the separate authority used by the PDF fallback in the native plugin.
+    const capacitorProvider='<provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths"/></provider>';
+    fs.writeFileSync(manifest,'<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application><activity android:name=".MainActivity"/><activity android:name=".WhatsAppWebActivity" android:exported="false"/><service android:name=".KeepThisService"/>'+capacitorProvider+'</application></manifest>');
     const inject=()=>injectAndroid('client',{cwd:temp});
     inject();
-    for(const file of ['MainActivity.java','QatfahNativePlugin.java','QatfahWhatsappDirect.java']){
+    for(const file of ['MainActivity.java','QatfahNativePlugin.java','QatfahWhatsappDirect.java','QatfahAttachmentProvider.java']){
       assert.equal(fs.readFileSync(path.join(destination,file),'utf8'),fs.readFileSync(path.join(native,file),'utf8'),`${file} must reach the APK unchanged`);
     }
     assert.equal(fs.readFileSync(path.join(app,'assets/whatsapp-direct.js'),'utf8'),fs.readFileSync(path.join(native,'whatsapp-direct.js'),'utf8'));
@@ -52,10 +55,39 @@ test('Android injection copies the actual MainActivity and hidden engine, remove
     const first=fs.readFileSync(manifest,'utf8');
     assert.equal(first.includes('WhatsAppWebActivity'),false);
     assert.ok(first.includes('.KeepThisService'));
+    assert.ok(first.includes(capacitorProvider),'keep Capacitor sharing provider unchanged');
     assert.ok(first.includes('${applicationId}.waattachments'));
+    assert.ok(first.includes('android:name="com.qatfah.accounting.QatfahAttachmentProvider"'));
     assert.ok(fs.existsSync(path.join(app,'res/xml/qatfah_wa_paths.xml')));
     const build=fs.readFileSync(gradle,'utf8');assert.ok(build.includes('androidx.webkit:webkit:1.13.0'));
     inject();assert.equal(fs.readFileSync(manifest,'utf8'),first);assert.equal(fs.readFileSync(gradle,'utf8'),build);
+  }finally{fs.rmSync(temp,{recursive:true,force:true});}
+});
+
+test('Android injection migrates only the attachment provider and repairs stale path metadata',()=>{
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'qatfah-provider-upgrade-'));
+  try{
+    fs.cpSync(native,path.join(temp,'native/android'),{recursive:true});
+    const app=path.join(temp,'android/app/src/main');
+    fs.mkdirSync(path.join(app,'res/xml'),{recursive:true});
+    fs.writeFileSync(path.join(temp,'android/app/build.gradle'),'');
+    const otherProvider='<provider android:name="example.OtherProvider" android:authorities="example.other" android:exported="false"/>';
+    const oldProvider='<provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.waattachments" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/old_paths"/></provider>';
+    const duplicate="<provider android:name='.QatfahAttachmentProvider' android:authorities='com.qatfah.accounting.waattachments'/>";
+    const manifest=path.join(app,'AndroidManifest.xml');
+    fs.writeFileSync(manifest,'<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application>'+otherProvider+oldProvider+duplicate+'</application></manifest>');
+    const paths=path.join(app,'res/xml/qatfah_wa_paths.xml');
+    fs.writeFileSync(paths,'<paths><root-path name="unsafe" path="/"/></paths>');
+    injectAndroid('client',{cwd:temp});
+    const first=fs.readFileSync(manifest,'utf8');
+    assert.ok(first.includes(otherProvider));
+    assert.equal((first.match(/\.waattachments/g)||[]).length,1,'one registered attachment authority');
+    assert.equal((first.match(/QatfahAttachmentProvider/g)||[]).length,1,'one distinct provider identity');
+    assert.equal(first.includes('@xml/old_paths'),false);
+    assert.ok(first.includes('android:resource="@xml/qatfah_wa_paths"'));
+    assert.equal(fs.readFileSync(paths,'utf8'),'<?xml version="1.0" encoding="utf-8"?><paths xmlns:android="http://schemas.android.com/apk/res/android"><cache-path name="wa-attachments" path="wa-attachments/"/></paths>');
+    injectAndroid('client',{cwd:temp});
+    assert.equal(fs.readFileSync(manifest,'utf8'),first);
   }finally{fs.rmSync(temp,{recursive:true,force:true});}
 });
 

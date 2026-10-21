@@ -6,7 +6,7 @@ import {authenticate,readRegistry,isSubscriptionActive} from './subscription.js'
 import {persistSessionObject,readSessionObject,clearSessionObject} from './session.js';
 import {createMoneyDesk} from './money-ui.js';
 import {accountBalances,financialPostings,fromMinor} from './money-services.js';
-import {createWhatsappSession,createWhatsappPairing,createWhatsappSender,whatsappSendMessage,normalizeYemenPhone,latinPhoneDigits} from './whatsapp-session.js';
+import {createWhatsappSession,createWhatsappPairing,createWhatsappSender,whatsappSendMessage,whatsappSendProgressMessage,whatsappSendDetails,normalizeYemenPhone,latinPhoneDigits} from './whatsapp-session.js';
 import {createEventBatch,invoiceEventEntries} from './event-batch.js';
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -17,7 +17,7 @@ let waPollBusy=false;
 let waStorage;try{waStorage=window.localStorage;}catch{}
 const waSession=createWhatsappSession({storage:waStorage,host:window,online:navigator.onLine});
 let waAuthMode=waSession.snapshot().linked?'connected':'qr';
-const waSend=createWhatsappSender({getPlugin:()=>window.Capacitor?.Plugins?.QatfahNative,isOnline:()=>navigator.onLine});
+const waSend=createWhatsappSender({getPlugin:()=>window.Capacitor?.Plugins?.QatfahNative,isOnline:()=>navigator.onLine,onProgress:value=>showWaSendProgress(whatsappSendProgressMessage(value))});
 waSession.subscribe(value=>{const root=$('wa-engine-root');if(root)root.dataset.linked=String(value.linked);renderWhatsappBadge();});
 const icons={
  sale:'<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/>',
@@ -361,15 +361,32 @@ function bindYemenPhoneInput(input){
  input.oninput=()=>{input.value=latinPhoneDigits(input.value).replace(/\D/g,'').slice(0,9);};
  input.onpaste=e=>{const value=e.clipboardData?.getData('text');if(!value)return;e.preventDefault();try{input.value=normalizeYemenPhone(value).slice(3);}catch(err){toast(err.message);}};
 }
-function showWaSendProgress(message=''){
- const status=$('wa-send-status');if(!status)return;status.textContent=message;status.hidden=!message;
+function showWaSendProgress(message='',{failure=false,details=''}={}){
+ const status=$('wa-send-status');if(!status)return;
+ status.hidden=!message;if(!message){status.replaceChildren();return;}
+ status.style.background=failure?'#702e2e':'#173e30';status.style.textAlign=failure?'right':'center';
+ status.style.whiteSpace='pre-line';status.style.maxHeight='45vh';status.style.overflowY='auto';
+ status.setAttribute('role',failure?'alert':'status');
+ const text=document.createElement('div');text.textContent=message;status.replaceChildren(text);
+ if(failure){
+  if(details){const detail=document.createElement('div');detail.textContent=details;detail.style.cssText='margin-top:8px;font-size:12px;opacity:.9';status.append(detail);}
+  const close=document.createElement('button');close.type='button';close.textContent='إغلاق';close.setAttribute('aria-label','إغلاق رسالة الإرسال');
+  close.style.cssText='display:block;margin-top:10px;padding:5px 14px;border:1px solid #ffffff80;border-radius:7px;background:transparent;color:inherit;font:inherit;cursor:pointer';
+  close.onclick=()=>showWaSendProgress();status.append(close);
+ }
 }
-let waPendingSendCount=0;
 async function sendWhatsappPayload(payload){
- waPendingSendCount++;
- showWaSendProgress('جاري إرسال المستند عبر واتساب…');
- try{const result=await waSend(payload);toast(whatsappSendMessage(result));return result;}
- finally{waPendingSendCount--;if(waPendingSendCount===0)showWaSendProgress();}
+ try{
+  const result=await waSend(payload),message=whatsappSendMessage(result);
+  const completed=result?.openedInWhatsApp===true||result?.submitted===true||['submitted','fallback_opened'].includes(result?.status)||result?.outcome==='submitted';
+  if(completed)showWaSendProgress();else showWaSendProgress(message,{failure:true,details:whatsappSendDetails(result)});
+  toast(message);return result;
+ }catch(error){
+  // A rejected duplicate tap belongs to no new send and must not replace the
+  // still-running request's progress or its eventual result.
+  if(error?.code!=='wa_send_busy')showWaSendProgress(error?.message||'تعذر تأكيد نتيجة الإرسال',{failure:true,details:whatsappSendDetails(error)});
+  throw error;
+ }
 }
 async function sendPdfToWhatsapp(phone,blob,filename,caption=''){
  const number=fixWhatsappNumber(phone);
