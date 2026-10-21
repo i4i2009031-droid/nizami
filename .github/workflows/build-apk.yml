@@ -82,6 +82,32 @@ jobs:
           cd android
           chmod +x gradlew
           ./gradlew --no-daemon assembleRelease
+      - name: Verify WhatsApp document provider in the built client APK
+        if: matrix.app == 'client'
+        env:
+          QATFAH_BUILD_MODE: ${{ steps.configure.outputs.mode }}
+        run: |
+          qatfah_apk_path="android/app/build/outputs/apk/${QATFAH_BUILD_MODE}/app-${QATFAH_BUILD_MODE}.apk"
+          test -s "$qatfah_apk_path"
+          qatfah_sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$qatfah_sdk_root"
+          qatfah_apkanalyzer="$(command -v apkanalyzer || true)"
+          if [ -z "$qatfah_apkanalyzer" ]; then
+            qatfah_apkanalyzer="$qatfah_sdk_root/cmdline-tools/latest/bin/apkanalyzer"
+          fi
+          test -x "$qatfah_apkanalyzer"
+          mkdir -p android/app/build/qatfah-checks
+          "$qatfah_apkanalyzer" manifest print "$qatfah_apk_path" > android/app/build/qatfah-checks/AndroidManifest.xml
+          "$qatfah_apkanalyzer" resources xml --file /res/xml/qatfah_wa_paths.xml "$qatfah_apk_path" > android/app/build/qatfah-checks/qatfah_wa_paths.xml
+          qatfah_aapt2="$(printf '%s\n' "$qatfah_sdk_root"/build-tools/*/aapt2 | sort -V | tail -n 1)"
+          test -x "$qatfah_aapt2"
+          "$qatfah_aapt2" dump resources "$qatfah_apk_path" > android/app/build/qatfah-checks/resources.txt
+          node scripts/verify-android-provider.mjs \
+            android/app/build/qatfah-checks/AndroidManifest.xml \
+            android/app/build/qatfah-checks/qatfah_wa_paths.xml \
+            com.qatfah.accounting \
+            android/app/build/qatfah-checks/resources.txt
+          printf 'WhatsApp PDF provider: verified in final APK manifest and resources\n' >> Qatfah-build-info-client.txt
       - name: Verify signature, name APK and record SHA256
         env:
           QATFAH_BUILD_MODE: ${{ steps.configure.outputs.mode }}

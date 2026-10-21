@@ -104,26 +104,93 @@ export function normalizeYemenPhone(rawPhone){
 
 // A failed bridge call may have happened after dispatch. Only an explicit,
 // pre-dispatch safe result permits opening the direct recipient fallback.
-export function createWhatsappSender({getPlugin,isOnline=()=>true}){
+export function createWhatsappSender({getPlugin,isOnline=()=>true,onProgress=()=>{},schedule=setInterval,cancel=clearInterval,interval=850,makeRequestId=()=>globalThis.crypto.randomUUID()}){
  let busy=false;
  return async payload=>{
-  if(busy)throw Error('يوجد مستند قيد الإرسال، انتظر نتيجته');
+  if(busy){const error=Error('يوجد مستند قيد الإرسال، انتظر نتيجته');error.code='wa_send_busy';throw error;}
   const plugin=getPlugin();
   if(!plugin?.sendWhatsAppInApp)throw Error('الإرسال الداخلي يتطلب نسخة قطفة الجديدة على أندرويد');
   if(!isOnline())throw Error('اتصل بالإنترنت لإرسال المستند');
   busy=true;
+  let timer=null,tracking=true,reading=false;
+  const stopTracking=()=>{tracking=false;if(timer!==null)cancel(timer);timer=null;};
+  // Rendering and status reads must never change the outcome of a real send.
+  const report=value=>{try{onProgress(value);}catch{}};
   try{
-   const result=await plugin.sendWhatsAppInApp(payload);
-   if(result?.safeToFallback===true&&result.dispatched!==true&&result.submitted!==true&&plugin.sendWhatsAppIntent)return await plugin.sendWhatsAppIntent(payload);
+   const requestId=makeRequestId(),request={...payload,requestId};
+   report({requestId,phase:'preparing',finished:false});
+   if(typeof plugin.whatsappSendStatus==='function')timer=schedule(async()=>{
+    if(!tracking||reading)return;
+    reading=true;
+    try{
+     const value=await plugin.whatsappSendStatus({requestId});
+     if(tracking&&value?.requestId===requestId&&value.finished!==true)report(value);
+    }catch{}finally{reading=false;}
+   },interval);
+   const result=await plugin.sendWhatsAppInApp(request);
+   // Invalidate in-flight status reads before fallback: their last driver stage
+   // must not overwrite the separate "opening WhatsApp" state.
+   stopTracking();
+   if(result?.safeToFallback===true&&result.dispatched===false&&result.submitted!==true&&plugin.sendWhatsAppIntent){
+    report({requestId,phase:'fallback_opening',finished:false});
+    try{
+     const fallback=await plugin.sendWhatsAppIntent(request);
+     if(fallback?.openedInWhatsApp===true||fallback?.status==='fallback_opened')return fallback;
+     const error=Error(fallback?.message||'لم تصل نتيجة فتح واتساب بالمستند');
+     error.code=fallback?.code;error.data=fallback;throw error;
+    }catch(fallbackError){
+     const error=Error(`تعذر الإرسال داخل واتساب: ${whatsappSendMessage(result)}\nالفتح البديل: ${fallbackError?.message||'تعذر فتح واتساب بالمستند'}`);
+     error.code='wa_fallback_failed';error.requestId=requestId;
+     error.primaryResult=result;error.fallbackError=fallbackError;error.cause=fallbackError;
+     throw error;
+    }
+   }
    if(!result)throw Error('لم تصل نتيجة الإرسال. راجع المحادثة قبل إعادة المحاولة');
    return result;
-  }finally{busy=false;}
+  }finally{stopTracking();busy=false;}
  };
+}
+
+const SEND_STAGES={
+ preparing:'تجهيز الإرسال',starting:'بدء الإرسال',uploading:'نقل ملف PDF',
+ open_chat:'فتح محادثة المستلم',opening_chat:'فتح محادثة المستلم',await_search:'فتح البحث عن المستلم',
+ await_result:'مطابقة رقم المستلم',await_chat:'فتح محادثة المستلم',
+ await_contact_info:'التحقق من رقم جهة الاتصال',await_contact_close:'العودة إلى محادثة المستلم',
+ await_attachment:'إرفاق ملف PDF',attaching:'إرفاق ملف PDF',
+ await_preview:'تجهيز معاينة المستند',waiting_preview:'تجهيز معاينة المستند',
+ await_text:'تجهيز الرسالة',submitting:'تقديم المستند إلى واتساب',
+ verifying:'التحقق من قبول واتساب للإرسال',fallback_preparing:'تجهيز الفتح البديل',
+ fallback_attachment_write:'تجهيز ملف المشاركة',fallback_provider:'إنشاء رابط للمرفق',fallback_opening:'فتح واتساب بالمرفق'
+};
+
+export function whatsappSendProgressMessage(value){
+ return SEND_STAGES[value?.phase]?`جاري ${SEND_STAGES[value.phase]}…`:'جاري إرسال المستند عبر واتساب…';
+}
+
+// Only explicit stage/code/version fields are presented. Payloads, contact data,
+// and arbitrary driver diagnostics never enter the visible diagnostic details.
+export function whatsappSendDetails(value){
+ const identifier=value=>typeof value==='string'&&/^[A-Za-z0-9_-]{1,80}$/.test(value)?value:'';
+ const primary=value?.primaryResult||value,parts=[];
+ const stage=identifier(primary?.failedStage||primary?.data?.failedStage);
+ const code=identifier(primary?.code||primary?.data?.code);
+ if(stage)parts.push('المرحلة: '+(SEND_STAGES[stage]||stage));
+ if(code)parts.push('الرمز: '+code);
+ const version=primary?.driverVersion??primary?.data?.driverVersion;
+ if(Number.isInteger(version)&&version>0)parts.push('المحرك: '+version);
+ const fallback=value?.fallbackError,fallbackCode=identifier(fallback?.code||fallback?.data?.code);
+ const fallbackStage=identifier(fallback?.failedStage||fallback?.data?.failedStage);
+ if(fallbackStage)parts.push('مرحلة الفتح البديل: '+(SEND_STAGES[fallbackStage]||fallbackStage));
+ if(fallbackCode)parts.push('رمز الفتح البديل: '+fallbackCode);
+ return parts.join(' • ');
 }
 
 export function whatsappSendMessage(result){
  if(result?.openedInWhatsApp===true||result?.status==='fallback_opened')return 'فتحنا المحادثة بالمرفق؛ أكمل الإرسال في واتساب';
  if(result?.submitted===true||result?.status==='submitted'||result?.outcome==='submitted')return 'تم تقديم المستند إلى واتساب للإرسال';
- if(result?.dispatched===true||result?.status==='uncertain'||result?.outcome==='uncertain')return 'لم يتأكد الإرسال؛ راجع المحادثة قبل إعادة المحاولة';
+ if(result?.dispatched===true||result?.status==='uncertain'||result?.outcome==='uncertain'){
+  const message=result.message||'لم يتأكد الإرسال';
+  return message.includes('راجع المحادثة')?message:message+'؛ راجع المحادثة قبل إعادة المحاولة';
+ }
  return result?.message||'تعذر إرسال المستند. افتح قسم واتساب لمراجعة الجلسة';
 }

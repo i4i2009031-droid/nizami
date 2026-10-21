@@ -9,7 +9,7 @@ export function injectAndroid(app,{cwd=process.cwd()}={}){
   const src=path.resolve(cwd,'native/android');
   const dir=path.resolve(cwd,'android/app/src/main/java/com/qatfah/accounting');
   fs.mkdirSync(dir,{recursive:true});
-  for(const file of ['MainActivity.java','QatfahNativePlugin.java','QatfahWhatsappDirect.java']){
+  for(const file of ['MainActivity.java','QatfahNativePlugin.java','QatfahWhatsappDirect.java','QatfahAttachmentProvider.java']){
     fs.copyFileSync(path.join(src,file),path.join(dir,file));
   }
   // The visible legacy WhatsApp Activity is no longer an application entry point.
@@ -17,8 +17,23 @@ export function injectAndroid(app,{cwd=process.cwd()}={}){
   const manifest=path.resolve(cwd,'android/app/src/main/AndroidManifest.xml');
   let xml=fs.readFileSync(manifest,'utf8');
   xml=xml.replace(/<activity\b(?=[^>]*android:name="(?:\.WhatsAppWebActivity|com\.qatfah\.accounting\.WhatsAppWebActivity)")[^>]*(?:\/\s*>|>[\s\S]*?<\/activity\s*>)/g,'');
-  if(!xml.includes('androidx.core.content.FileProvider')){
-    const provider='<provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.waattachments" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/qatfah_wa_paths"/></provider>';
+  // Capacitor has its own androidx.core.content.FileProvider (.fileprovider).
+  // Match our authority, not that shared base class. A distinct subclass also
+  // prevents the manifest merger from combining the two provider identities.
+  const provider='<provider android:name="com.qatfah.accounting.QatfahAttachmentProvider" android:authorities="${applicationId}.waattachments" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/qatfah_wa_paths"/></provider>';
+  let providerWritten=false;
+  xml=xml.replace(/<provider\b[^>]*?(?:\/\s*>|>[\s\S]*?<\/provider\s*>)/g,node=>{
+    const tag=node.slice(0,node.indexOf('>')+1);
+    const name=tag.match(/\bandroid:name\s*=\s*(["'])(.*?)\1/)?.[2];
+    const authority=tag.match(/\bandroid:authorities\s*=\s*(["'])(.*?)\1/)?.[2];
+    const ours=name==='com.qatfah.accounting.QatfahAttachmentProvider'||name==='.QatfahAttachmentProvider'||authority==='${applicationId}.waattachments'||authority==='com.qatfah.accounting.waattachments';
+    if(!ours)return node;
+    if(providerWritten)return '';
+    providerWritten=true;
+    return provider;
+  });
+  if(!providerWritten){
+    if(!xml.includes('</application>'))throw Error('Android manifest has no application closing tag');
     xml=xml.replace('</application>',provider+'\n    </application>');
   }
   const xmlDir=path.resolve(cwd,'android/app/src/main/res/xml');

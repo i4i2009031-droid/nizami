@@ -52,6 +52,8 @@ public final class QatfahWhatsappDirect {
  private PluginCall pending,pairingCall,logoutCall;
  private boolean driverMayHaveStarted=false;
  private Runnable sendDeadline,logoutDeadline;
+ private String sendRequestId="";
+ private JSObject cachedSendStatus=new JSObject();
 
  private QatfahWhatsappDirect(Activity activity){
   this.activity=activity;
@@ -318,12 +320,51 @@ public final class QatfahWhatsappDirect {
   try{Object decoded=new org.json.JSONTokener(value).nextValue();return decoded instanceof String?(String)decoded:value;}catch(Exception e){return value;}
  }
  private boolean active(long generation){return pending!=null&&!released&&web!=null&&generation==sendGeneration;}
+ /** Passive send progress only: no DOM evaluation, session probe or navigation. */
+ public void getSendStatus(PluginCall call){
+  activity.runOnUiThread(()->{
+   if(cachedSendStatus.length()==0){
+    JSObject idle=sendResult("idle","",false,false);idle.put("finished",true);call.resolve(idle);
+   }else call.resolve(cachedSendStatus);
+  });
+ }
  private JSObject sendResult(String status,String message,Boolean dispatched,boolean safeToFallback){
-  JSObject out=new JSObject();out.put("status",status);out.put("message",message);
-  out.put("dispatched",dispatched==null?JSONObject.NULL:dispatched);out.put("safeToFallback",safeToFallback);
+  JSObject out=new JSObject();out.put("requestId",sendRequestId);out.put("status",status);out.put("phase",status);out.put("message",message);
+  out.put("dispatched",dispatched==null?JSONObject.NULL:dispatched);
+  out.put("submitted","submitted".equals(status));
+  out.put("safeToFallback",safeToFallback&&Boolean.FALSE.equals(dispatched)&&!"submitted".equals(status)&&!"uncertain".equals(status));
+  out.put("code","");out.put("failedStage","");out.put("driverVersion",0);out.put("finished",false);
   out.put("deliveryConfirmed",false);return out;
  }
+ private void sendProgress(String phase,String message,boolean driverStarted){
+  cachedSendStatus=sendResult(phase,message,driverStarted?null:Boolean.FALSE,!driverStarted);
+ }
+ private static String diagnosticToken(JSONObject state,String key){
+  String value=state.optString(key,"");return value.matches("[a-zA-Z0-9_]{1,80}")?value:"";
+ }
+ private JSObject driverSendResult(JSONObject state,String phase){
+  Boolean dispatched=state.opt("dispatched") instanceof Boolean?(Boolean)state.opt("dispatched"):null;
+  if("submitted".equals(phase))dispatched=Boolean.TRUE;
+  String message=state.optString("message","");if(message.length()>500)message=message.substring(0,500);
+  boolean safe=Boolean.TRUE.equals(state.opt("safeToFallback"))&&Boolean.FALSE.equals(state.opt("submitted"));
+  JSObject out=sendResult(phase,message,dispatched,safe);
+  out.put("code",diagnosticToken(state,"code"));out.put("failedStage",diagnosticToken(state,"failedStage"));
+  out.put("driverVersion",Math.max(0,Math.min(100,state.optInt("driverVersion",0))));
+  JSONObject source=state.optJSONObject("diagnostics");
+  if(source!=null){
+   JSObject diagnostics=new JSObject();
+   for(String key:new String[]{"recipientVerified","attachmentStaged","draftTouched"}){
+    if(source.opt(key) instanceof Boolean)diagnostics.put(key,source.optBoolean(key,false));
+   }
+   for(String key:new String[]{"fileInputCount","compatiblePdfInputCount","searchResultCount"}){
+    if(source.opt(key) instanceof Number)diagnostics.put(key,Math.max(0,Math.min(10000,source.optInt(key,0))));
+   }
+   out.put("diagnostics",diagnostics);
+  }
+  return out;
+ }
  private void finish(JSObject result){
+  result.put("requestId",sendRequestId);result.put("finished",true);cachedSendStatus=result;
   PluginCall call=pending;pending=null;uploading=false;driverMayHaveStarted=false;sendGeneration++;
   if(sendDeadline!=null)handler.removeCallbacks(sendDeadline);sendDeadline=null;
   try{if(web!=null&&injected)web.evaluateJavascript("window.__qatfahDirect&&window.__qatfahDirect.cancel()",null);}
@@ -331,15 +372,22 @@ public final class QatfahWhatsappDirect {
   finally{if(call!=null)call.resolve(result);}
  }
  private void finishFailure(String message,boolean safeToFallback){
+  finishFailure(message,safeToFallback,"native_send_interrupted");
+ }
+ private void finishFailure(String message,boolean safeToFallback,String code){
   if(pending==null)return;
-  finish(sendResult(safeToFallback?"error":"uncertain",message,safeToFallback?Boolean.FALSE:null,safeToFallback));
+  JSObject out=sendResult(safeToFallback?"error":"uncertain",message,safeToFallback?Boolean.FALSE:null,safeToFallback);
+  out.put("code",code);out.put("failedStage",cachedSendStatus.optString("phase","preparing"));
+  out.put("driverVersion",cachedSendStatus.optInt("driverVersion",0));
+  if(cachedSendStatus.has("diagnostics"))out.put("diagnostics",cachedSendStatus.opt("diagnostics"));
+  finish(out);
  }
  private void injectAndSend(long generation){
   if(!active(generation))return;
   if(!injected){
    web.evaluateJavascript(script,value->{
     if(!active(generation))return;
-    if(!"true".equals(value)){finishFailure("تعذر تجهيز محرك إرسال واتساب",true);return;}
+    if(!"true".equals(value)){finishFailure("تعذر تجهيز محرك إرسال واتساب",true,"native_driver_injection_failed");return;}
     injected=true;injectAndSend(generation);
    });return;
   }
@@ -350,10 +398,11 @@ public final class QatfahWhatsappDirect {
    options.put("isPdf",!base64.isEmpty());
    web.evaluateJavascript("window.__qatfahDirect.prepare("+options.toString()+")",value->{
     if(!active(generation))return;
-    if(!"true".equals(value)){finishFailure("واتساب مشغول بمحاولة إرسال أخرى",false);return;}
+    if(!"true".equals(value)){finishFailure("واتساب مشغول بمحاولة إرسال أخرى",false,"native_driver_busy");return;}
+    if(!base64.isEmpty())sendProgress("uploading","جارٍ تجهيز مرفق PDF داخل واتساب",false);
     if(base64.isEmpty())beginSend(generation);else sendChunk(base64,0,generation);
    });
-  }catch(Exception e){finishFailure("تعذر تجهيز رسالة واتساب",true);}
+  }catch(Exception e){finishFailure("تعذر تجهيز رسالة واتساب",true,"native_prepare_failed");}
  }
  private void sendChunk(String base64,int index,long generation){
   if(!active(generation))return;
@@ -362,16 +411,17 @@ public final class QatfahWhatsappDirect {
   String chunk=JSONObject.quote(base64.substring(index,end));
   web.evaluateJavascript("window.__qatfahDirect.addChunk("+chunk+")",value->{
    if(!active(generation))return;
-   if(!"true".equals(value)){finishFailure("فشل نقل مرفق PDF إلى واتساب",true);return;}
+   if(!"true".equals(value)){finishFailure("فشل نقل مرفق PDF إلى واتساب",true,"native_pdf_transfer_failed");return;}
    sendChunk(base64,end,generation);
   });
  }
  private void beginSend(long generation){
   if(!active(generation))return;
   driverMayHaveStarted=true;
+  sendProgress("starting","جارٍ فتح محادثة المستلم داخل واتساب",true);
   web.evaluateJavascript("window.__qatfahDirect.start()",value->{
    if(!active(generation))return;
-   if(!"true".equals(value)){finishFailure("تعذر تأكيد بدء الإرسال؛ راجع المحادثة قبل إعادة المحاولة",false);return;}
+   if(!"true".equals(value)){finishFailure("تعذر تأكيد بدء الإرسال؛ راجع المحادثة قبل إعادة المحاولة",false,"native_start_unconfirmed");return;}
    check(generation);
   });
  }
@@ -380,14 +430,13 @@ public final class QatfahWhatsappDirect {
   web.evaluateJavascript("window.__qatfahDirect&&window.__qatfahDirect.status()",value->{
    if(!active(generation))return;
    try{
-    JSONObject state=new JSONObject(decode(value));String phase=state.optString("phase","");
+    JSONObject state=new JSONObject(decode(value));String phase=diagnosticToken(state,"phase");
+    if(!phase.isEmpty())cachedSendStatus=driverSendResult(state,phase);
     if("submitted".equals(phase)){
-     finish(sendResult("submitted",state.optString("message","ظهرت الرسالة ضمن الرسائل الصادرة؛ لم يتأكد التسليم"),true,false));return;
+     finish(cachedSendStatus);return;
     }
     if("error".equals(phase)||"not_linked".equals(phase)||"uncertain".equals(phase)){
-     boolean safe=state.has("dispatched")&&!state.optBoolean("dispatched",true)&&state.optBoolean("safeToFallback",false);
-     Boolean dispatched=state.has("dispatched")?state.optBoolean("dispatched",false):null;
-     finish(sendResult(phase,state.optString("message","تعذر تأكيد إرسال واتساب"),dispatched,safe));return;
+     finish(cachedSendStatus);return;
     }
    }catch(Exception ignored){}
    handler.postDelayed(()->check(generation),850);
@@ -396,13 +445,18 @@ public final class QatfahWhatsappDirect {
  public void send(PluginCall call){
   activity.runOnUiThread(()->{
    if(pending!=null||uploading){call.reject("يوجد إرسال جارٍ بالفعل");return;}
+   String requestId=call.getString("requestId","");
+   sendRequestId=requestId.matches("[a-zA-Z0-9_-]{1,100}")?requestId:java.util.UUID.randomUUID().toString();
+   sendProgress("preparing","جارٍ تجهيز الإرسال داخل واتساب",false);
    if(web==null||released||!loaded||requiresRetry||!permanentlyLinked){
-    call.resolve(sendResult("error","جلسة واتساب غير جاهزة للإرسال داخل قطفة",false,true));return;
+    JSObject result=sendResult("error","جلسة واتساب غير جاهزة للإرسال داخل قطفة",false,true);
+    result.put("code","native_session_not_ready");result.put("failedStage","preparing");result.put("finished",true);
+    cachedSendStatus=result;call.resolve(result);return;
    }
    pending=call;uploading=true;driverMayHaveStarted=false;final long generation=++sendGeneration;
-   sendDeadline=()->{if(active(generation))finishFailure("تعذر تأكيد نتيجة واتساب؛ راجع المحادثة قبل إعادة المحاولة",!driverMayHaveStarted);};
+   sendDeadline=()->{if(active(generation))finishFailure("تعذر تأكيد نتيجة واتساب؛ راجع المحادثة قبل إعادة المحاولة",!driverMayHaveStarted,"native_send_timeout");};
    handler.postDelayed(sendDeadline,70000);
-   try{injectAndSend(generation);}catch(Exception e){finishFailure("تعذر بدء الإرسال داخل واتساب",!driverMayHaveStarted);}
+   try{injectAndSend(generation);}catch(Exception e){finishFailure("تعذر بدء الإرسال داخل واتساب",!driverMayHaveStarted,"native_send_exception");}
   });
  }
  private void destroySurface(){
