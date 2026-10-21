@@ -295,12 +295,12 @@ async function sendPdfToWhatsapp(phone,blob,filename,caption=''){
  const number=fixWhatsappNumber(phone);
  const plugin=window.Capacitor?.Plugins?.QatfahNative;
  if(!plugin?.sendWhatsAppInApp)throw Error('الإرسال الداخلي يتطلب نسخة قطفة الجديدة على أندرويد');
- if(!navigator.onLine)throw Error('اتصل بالإنترنت لفتح واتساب');
+ if(!navigator.onLine)throw Error('اتصل بالإنترنت لإرسال المستند');
  const arr=new Uint8Array(await blob.arrayBuffer());
  if(arr.length>5000000)throw Error('المستند أكبر من 5 ميجابايت');
  let raw='';for(let i=0;i<arr.length;i+=32768)raw+=String.fromCharCode(...arr.subarray(i,i+32768));
  const result=await plugin.sendWhatsAppInApp({phone:number,caption,base64:btoa(raw),filename});
- toast(result.message||'افتح المحادثة المدمجة وأكد الإرسال');
+ toast(result.message||'تمت محاولة الإرسال دون فتح نافذة');
 }
 async function shareWhatsapp(phone,text){
  try{
@@ -308,12 +308,12 @@ async function shareWhatsapp(phone,text){
   const plugin=window.Capacitor?.Plugins?.QatfahNative;
   if(!plugin?.sendWhatsAppInApp)throw Error('الإرسال الداخلي متاح في تطبيق أندرويد فقط');
   const result=await plugin.sendWhatsAppInApp({phone:number,caption:text});
-  toast(result.message||'تم فتح المحادثة داخل قطفة');
+  toast(result.message||'تمت محاولة الإرسال دون فتح نافذة');
  }catch(e){toast(e.message);}
 }
 
 function openWhatsapp(){
- showSheet('ربط واتساب في قطفة',`<div class="qr-box"><h3>ربط واتساب</h3><p class="hint">تظهر شاشة صغيرة للباركود أو رمز الهاتف وحالة الاتصال فقط، دون عرض صفحة المحادثات داخل قطفة. قد يمنع واتساب استخراج الرمز من WebView غير رسمي.</p><button type="button" id="wa-native" class="btn btn-primary">فتح شاشة QR / رمز الربط</button><p class="hint">عند إرسال PDF من الفواتير والكشوف، يُفتح تطبيق واتساب الأصلي لاختيار المستلم وتأكيد الإرسال؛ لا يملك قطفة واجهة رسمية للإرسال المخفي بلا تأكيد.</p></div>`);
+ showSheet('ربط واتساب في قطفة',`<div class="qr-box"><h3>ربط واتساب</h3><p class="hint">تظهر شاشة صغيرة للباركود أو رمز الهاتف وحالة الاتصال فقط، دون عرض صفحة المحادثات داخل قطفة. قد يمنع واتساب استخراج الرمز من WebView غير رسمي.</p><button type="button" id="wa-native" class="btn btn-primary">فتح شاشة QR / رمز الربط</button><p class="hint">إرسال PDF من الفواتير والكشوف يتم من الزر مباشرة داخل جلسة واتساب المدمجة، دون نافذة مشاركة. قد يتوقف إذا تغيّرت واجهة واتساب؛ عدم تأكيد الإرسال يظهر كخطأ.</p></div>`);
  $('wa-native').onclick=async()=>{try{const p=window.Capacitor?.Plugins?.QatfahNative;if(!p?.openWhatsAppWeb)throw Error('شاشة الربط المدمجة متاحة على Android فقط');await p.openWhatsAppWeb();}catch(e){toast(e.message)}};
 }
 
