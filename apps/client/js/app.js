@@ -11,6 +11,7 @@ const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"']/g,
 const toast=message=>{const e=$('toast');e.textContent=message;e.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>e.classList.remove('show'),3300);};
 const localDate=()=>dateOnly(new Date().toISOString());
 let state={session:null,events:[],screen:'home'};
+let whatsappLinkState='not_started',waPollBusy=false;
 const icons={
  sale:'<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/>',
  purchase:'<path d="M3 5h2l2 11h11l3-8H7"/><circle cx="9" cy="20" r="1"/><circle cx="18" cy="20" r="1"/>',
@@ -46,18 +47,35 @@ async function initial(){
  window.addEventListener('online',()=>{setNetworkBadge();if(state.session?.mode==='github')checkSubscription().catch(()=>{});});window.addEventListener('offline',setNetworkBadge);
  if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js').catch(()=>{});
  setInterval(()=>{if(state.session?.mode==='github'&&navigator.onLine)checkSubscription().catch(()=>{});},300000);
- setInterval(()=>{if(!state.session)return;window.Capacitor?.Plugins?.QatfahNative?.whatsappConnectionStatus?.().then(r=>{const pill=$('wa-pill');if(!pill)return;const connected=r?.status==='connected';pill.classList.toggle('connected',connected);pill.innerHTML='<i class="pulse wa"></i> '+(connected?'واتساب متصل':'واتساب: '+(r?.status==='linking'?'جاري الربط':'غير متصل'));}).catch(()=>{});},12000);
+ setInterval(pollWhatsappConnection,8000);
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden)pollWhatsappConnection().catch(()=>{});});
 }
-async function activate(session){state.session=session;setTenant(session.user.id||'demo');state.events=await allEvents();$('login-screen').hidden=true;$('app-shell').hidden=false;render();window.Capacitor?.Plugins?.QatfahNative?.startWhatsAppSession?.().catch(()=>{});if(session.mode==='github'&&navigator.onLine)checkSubscription().catch(()=>{}); }
+async function activate(session){state.session=session;setTenant(session.user.id||'demo');state.events=await allEvents();$('login-screen').hidden=true;$('app-shell').hidden=false;render();window.Capacitor?.Plugins?.QatfahNative?.startWhatsAppSession?.().then(()=>pollWhatsappConnection()).catch(()=>{});if(session.mode==='github'&&navigator.onLine)checkSubscription().catch(()=>{}); }
 function persistSession(){if(state.session)persistSessionObject(state.session);}
 async function checkSubscription(){if(state.session?.mode!=='github'||!navigator.onLine)return;try{const users=await readRegistry(),account=users.find(x=>x.id===state.session.user.id);if(!account?.active||account.expiresAt<localDate()){toast('تم إيقاف اشتراكك أو انتهى؛ تواصل مع الإدارة');logout(true);return;}state.session.user.expiresAt=account.expiresAt;state.session.lastChecked=Date.now();persistSession();}catch(e){console.warn('Registry temporarily unavailable',e);}}
 function updateClock(){const d=new Date();$('live-time').textContent=d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',hour12:false});let hi=d.getHours()<12?'صباح الخير':'مساء الخير';document.querySelector('.hi').textContent=hi+' 👋';}
+function renderWhatsappBadge(){
+ const pill=$('wa-pill');if(!pill)return;
+ const status=navigator.onLine?whatsappLinkState:'offline';
+ const messages={connected:'واتساب متصل',offline:'واتساب دون إنترنت',not_linked:'واتساب غير مرتبط',linking:'واتساب جاري الربط',connecting:'واتساب يتصل',reconnecting:'واتساب يعيد الاتصال',loading:'واتساب يحمّل',not_started:'واتساب يبدأ',unknown:'واتساب يتحقق',unavailable:'واتساب غير متاح'};
+ pill.classList.toggle('connected',status==='connected');
+ pill.innerHTML='<i class="pulse wa"></i> '+(messages[status]||messages.unknown);
+}
+async function pollWhatsappConnection(){
+ if(!state.session||waPollBusy)return;
+ const native=window.Capacitor?.Plugins?.QatfahNative;
+ if(!native?.whatsappConnectionStatus){whatsappLinkState='unavailable';renderWhatsappBadge();return;}
+ waPollBusy=true;
+ try{const result=await native.whatsappConnectionStatus();whatsappLinkState=result?.status||'unknown';}
+ catch{whatsappLinkState='unknown';}
+ finally{waPollBusy=false;renderWhatsappBadge();}
+}
 function setNetworkBadge(){
  const pill=$('server-pill');pill.classList.remove('connected');pill.innerHTML='<i class="pulse"></i> الدفتر محفوظ على الجهاز';
- $('wa-pill').classList.remove('connected');$('wa-pill').innerHTML='<i class="pulse wa"></i> فتح واتساب ويب';
+ renderWhatsappBadge();
 }
 async function record(type,payload){const e={id:crypto.randomUUID(),type,payload,at:new Date().toISOString(),synced:true};await putEvent(e);state.events=await allEvents();render();toast('تم حفظ العملية على الجهاز ✓');return e;}
-function render(){if(!state.session)return;const p=store();$('store-name').textContent=p.name||state.session.user.storeName||'قطفة';$('store-subtitle').textContent=state.session.mode==='demo'?'الوضع التجريبي المحلي':'دفتر حسابات المحل';$('store-logo').src=p.logo||'./assets/icon-192.png';setNetworkBadge();document.querySelectorAll('[data-nav]').forEach(x=>x.classList.toggle('active',x.dataset.nav===state.screen));$('home-page').hidden=state.screen!=='home';$('content-page').hidden=state.screen==='home';if(state.screen==='home')renderHome();else if(state.screen==='invoices')renderInvoices();else if(state.screen==='parties')renderParties();else if(state.screen==='reports')renderReports();else renderSettings();}
+function render(){if(!state.session)return;const p=store();$('store-name').textContent=p.name||state.session.user.storeName||'قطفة';$('store-subtitle').textContent=state.session.mode==='demo'?'دفتر حسابات محلي':'دفتر حسابات المحل';$('store-logo').src=p.logo||'./assets/icon-192.png';setNetworkBadge();document.querySelectorAll('[data-nav]').forEach(x=>x.classList.toggle('active',x.dataset.nav===state.screen));$('home-page').hidden=state.screen!=='home';$('content-page').hidden=state.screen==='home';if(state.screen==='home')renderHome();else if(state.screen==='invoices')renderInvoices();else if(state.screen==='parties')renderParties();else if(state.screen==='reports')renderReports();else renderSettings();}
 function setScreen(page){state.screen=page;render();window.scrollTo({top:0,behavior:'smooth'});}
 function renderHome(){const s=summary(state.events),cashYER=accountBalances(state.events).YER.cash,today=summary(state.events,localDate(),localDate());const recent=activeRecords(state.events).filter(e=>!['settings.update','party.add'].includes(e.type)).sort((a,b)=>b.at.localeCompare(a.at)).slice(0,5),people=parties(state.events);
  $('home-page').innerHTML=`
@@ -95,7 +113,7 @@ async function reportPdf(share){
  return share?sharePdf(blob,`Qatfah-report-${currency}.pdf`):downloadBlob(blob,`Qatfah-report-${currency}.pdf`);
 }
 
-function renderSettings(){const p=store();$('content-page').innerHTML=`<div class="content-header"><div><h2>الإعدادات</h2><small>هوية المحل والمزامنة والنسخ الاحتياطي</small></div></div><section class="flat-card"><div class="row"><img class="settings-avatar" src="${esc(p.logo||'./assets/icon-192.png')}" alt="شعار المحل"/><div><h3 style="margin-bottom:3px">${esc(p.name)}</h3><p class="muted" style="margin:0;font-size:11px">${esc(p.address||'اليمن')}</p></div></div><div class="setting-item"><span>تخصيص المحل والفواتير</span><button class="text-button" data-action="profile">تعديل ←</button></div><div class="setting-item"><span>سجل الأصناف والأسعار</span><button class="text-button" data-action="items">فتح ←</button></div><div class="setting-item"><span>النسخ الاحتياطي وGoogle Drive</span><button class="text-button" data-action="backup">فتح ←</button></div><div class="setting-item"><span>واتساب والربط</span><button class="text-button" data-action="whatsapp">الإدارة ←</button></div><div class="setting-item"><span>العمل محليًا دون خادم</span><small>مفعّل ✓</small></div><div class="setting-item"><span>الحساب الحالي</span><small>${esc(state.session.user.username||'عرض تجريبي')}</small></div></section><button class="btn btn-danger btn-block" data-action="logout">تسجيل الخروج</button><div class="footer-warning">العمليات محفوظة على هذا الجهاز. احفظ نسخة JSON عبر منتقي ملفات أندرويد بصورة دورية؛ النسخة غير مشفرة وقد تحتوي بيانات مالية خاصة.</div>`;}
+function renderSettings(){const p=store();$('content-page').innerHTML=`<div class="content-header"><div><h2>الإعدادات</h2><small>هوية المحل والمزامنة والنسخ الاحتياطي</small></div></div><section class="flat-card"><div class="row"><img class="settings-avatar" src="${esc(p.logo||'./assets/icon-192.png')}" alt="شعار المحل"/><div><h3 style="margin-bottom:3px">${esc(p.name)}</h3><p class="muted" style="margin:0;font-size:11px">${esc(p.address||'اليمن')}</p></div></div><div class="setting-item"><span>تخصيص المحل والفواتير</span><button class="text-button" data-action="profile">تعديل ←</button></div><div class="setting-item"><span>سجل الأصناف والأسعار</span><button class="text-button" data-action="items">فتح ←</button></div><div class="setting-item"><span>النسخ الاحتياطي وGoogle Drive</span><button class="text-button" data-action="backup">فتح ←</button></div><div class="setting-item"><span>واتساب والربط</span><button class="text-button" data-action="whatsapp">الإدارة ←</button></div><div class="setting-item"><span>العمل محليًا دون خادم</span><small>مفعّل ✓</small></div><div class="setting-item"><span>الحساب الحالي</span><small>${esc(state.session.user.username||'دفتر محلي')}</small></div></section><button class="btn btn-danger btn-block" data-action="logout">تسجيل الخروج</button><div class="footer-warning">العمليات محفوظة على هذا الجهاز. احفظ نسخة JSON عبر منتقي ملفات أندرويد بصورة دورية؛ النسخة غير مشفرة وقد تحتوي بيانات مالية خاصة.</div>`;}
 const showSheet=(title,html)=>{$('sheet').classList.remove('invoice-view');$('sheet-title').textContent=title;$('sheet-body').innerHTML=html;$('sheet-backdrop').hidden=false;document.body.style.overflow='hidden';};
 const closeSheet=()=>{$('sheet').classList.remove('invoice-view');$('sheet-backdrop').hidden=true;document.body.style.overflow='';$('sheet-body').innerHTML='';};
 const partyOptions=(chosen='')=>parties(state.events).map(p=>`<option value="${p.id}" ${p.id===chosen?'selected':''}>${esc(p.name)} (${p.type==='supplier'?'مورد':'عميل'})</option>`).join('');
@@ -375,6 +393,6 @@ $('login-form').onsubmit=async ev=>{ev.preventDefault();const f=new FormData(ev.
  const session={token:null,mode:'github',user,lastChecked:Date.now()};persistSessionObject(session);await activate(session);
  }catch(e){toast(e.message)}finally{button.disabled=false;}};
 
-$('demo-button').onclick=async()=>{const demo={mode:'demo',token:null,user:{id:'demo',username:'demo',storeName:'محل قطفة التجريبي',expiresAt:'2099-12-31'},lastChecked:Date.now()};persistSessionObject(demo);await activate(demo);};
+$('demo-button').onclick=async()=>{const demo={mode:'demo',token:null,user:{id:'demo',username:'demo',storeName:'محل قطفة',expiresAt:'2099-12-31'},lastChecked:Date.now()};persistSessionObject(demo);await activate(demo);};
 
 initial().catch(e=>{console.error(e);toast('تعذر فتح قاعدة البيانات المحلية: '+e.message);});
