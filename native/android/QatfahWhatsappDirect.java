@@ -203,7 +203,7 @@ public final class QatfahWhatsappDirect {
  }
  public void send(PluginCall call){
   activity.runOnUiThread(()->{
-   if(pending!=null||inLinkScreen){call.reject("واتساب مشغول بربط الجهاز أو إرسال آخر");return;}
+   if(pending!=null){call.reject("يوجد إرسال جارٍ بالفعل");return;}
    try{
     pending=call;startedAt=System.currentTimeMillis();uploading=true;atRecipient=false;
     init();
