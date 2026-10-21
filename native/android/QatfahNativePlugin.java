@@ -28,34 +28,22 @@ public class QatfahNativePlugin extends Plugin {
     catch(Exception ex) { call.reject("تعذر فتح واتساب ويب",ex); }
   }
 
-  /** Opens the embedded WhatsApp Web session; no Android Sharesheet or external WhatsApp app. */
+  private QatfahWhatsappDirect direct;
   @PluginMethod public void sendWhatsAppInApp(PluginCall call) {
     String phone=call.getString("phone","");
     String caption=call.getString("caption","");
     String base64=call.getString("base64","");
     String filename=call.getString("filename","Qatfah.pdf");
     if(!phone.matches("[0-9]{9,15}")){call.reject("رقم المستلم غير صالح");return;}
-    if(caption.length()>3000||filename.length()>120){call.reject("محتوى طويل");return;}
-    try {
-      Intent intent=new Intent(getActivity(),WhatsAppWebActivity.class);
-      intent.putExtra("phone",phone);intent.putExtra("caption",caption);
-      if(!base64.isEmpty()) {
-        byte[] bytes=Base64.decode(base64,Base64.DEFAULT);
-        if(bytes.length>5_000_000||bytes.length<5||!(new String(bytes,0,5,StandardCharsets.US_ASCII).equals("%PDF-"))){call.reject("ملف PDF غير صالح أو كبير");return;}
-        String safeName=filename.replaceAll("[^a-zA-Z0-9_.-]","_");
-        if(!safeName.toLowerCase().endsWith(".pdf"))safeName+=".pdf";
-        File folder=new File(getContext().getCacheDir(),"wa-attachments");
-        if(!folder.exists()&&!folder.mkdirs())throw new IllegalStateException("Cannot create cache folder");
-        File pdf=new File(folder,safeName);
-        try(FileOutputStream out=new FileOutputStream(pdf)){out.write(bytes);}
-        intent.putExtra("pdf_path",pdf.getAbsolutePath());
-        intent.putExtra("pdf_name",safeName);
-      }
-      getActivity().startActivity(intent);
-      JSObject result=new JSObject();result.put("opened",true);result.put("sent",false);
-      result.put("message","تم فتح المحادثة داخل قطفة؛ يرجى تأكيد الإرسال داخل واتساب.");
-      call.resolve(result);
-    }catch(Exception ex){call.reject("تعذر فتح الإرسال الداخلي",ex);}
+    if(caption.length()>3000||filename.length()>120||base64.length()>7000000){call.reject("الملف أو الرسالة غير صالح");return;}
+    if(!base64.isEmpty()){
+      try{
+        byte[] header=Base64.decode(base64.substring(0,Math.min(16,base64.length())),Base64.DEFAULT);
+        if(header.length<5||!new String(header,0,5,StandardCharsets.US_ASCII).equals("%PDF-")){call.reject("يجب اختيار ملف PDF صحيح");return;}
+      }catch(Exception e){call.reject("ملف PDF غير صالح");return;}
+    }
+    if(direct==null)direct=new QatfahWhatsappDirect(getActivity());
+    direct.send(call);
   }
 
   @PluginMethod public void saveJson(PluginCall call) {
