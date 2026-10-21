@@ -16,7 +16,7 @@ public final class MainActivity extends BridgeActivity {
       // The accounting UI stays usable; an explicit WhatsApp retry reports errors.
     }
   }
-  @Override protected void onDestroy() {
+  @Override public void onDestroy() {
     // Real obsolete Activities release views/callbacks, preserving origin storage
     // and the durable pairing preference for the next Activity/process startup.
     if(whatsapp!=null){whatsapp.release();whatsapp=null;}
