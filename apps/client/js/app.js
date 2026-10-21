@@ -115,7 +115,7 @@ async function reportPdf(share){
 
 function renderSettings(){const p=store();$('content-page').innerHTML=`<div class="content-header"><div><h2>الإعدادات</h2><small>هوية المحل والمزامنة والنسخ الاحتياطي</small></div></div><section class="flat-card"><div class="row"><img class="settings-avatar" src="${esc(p.logo||'./assets/icon-192.png')}" alt="شعار المحل"/><div><h3 style="margin-bottom:3px">${esc(p.name)}</h3><p class="muted" style="margin:0;font-size:11px">${esc(p.address||'اليمن')}</p></div></div><div class="setting-item"><span>تخصيص المحل والفواتير</span><button class="text-button" data-action="profile">تعديل ←</button></div><div class="setting-item"><span>سجل الأصناف والأسعار</span><button class="text-button" data-action="items">فتح ←</button></div><div class="setting-item"><span>النسخ الاحتياطي وGoogle Drive</span><button class="text-button" data-action="backup">فتح ←</button></div><div class="setting-item"><span>واتساب والربط</span><button class="text-button" data-action="whatsapp">الإدارة ←</button></div><div class="setting-item"><span>العمل محليًا دون خادم</span><small>مفعّل ✓</small></div><div class="setting-item"><span>الحساب الحالي</span><small>${esc(state.session.user.username||'دفتر محلي')}</small></div></section><button class="btn btn-danger btn-block" data-action="logout">تسجيل الخروج</button><div class="footer-warning">العمليات محفوظة على هذا الجهاز. احفظ نسخة JSON عبر منتقي ملفات أندرويد بصورة دورية؛ النسخة غير مشفرة وقد تحتوي بيانات مالية خاصة.</div>`;}
 const showSheet=(title,html)=>{$('sheet').classList.remove('invoice-view');$('sheet-title').textContent=title;$('sheet-body').innerHTML=html;$('sheet-backdrop').hidden=false;document.body.style.overflow='hidden';};
-const closeSheet=()=>{$('sheet').classList.remove('invoice-view');$('sheet-backdrop').hidden=true;document.body.style.overflow='';$('sheet-body').innerHTML='';};
+const closeSheet=()=>{stopWaPairingPolling();$('sheet').classList.remove('invoice-view');$('sheet-backdrop').hidden=true;document.body.style.overflow='';$('sheet-body').innerHTML='';};
 const partyOptions=(chosen='')=>parties(state.events).map(p=>`<option value="${p.id}" ${p.id===chosen?'selected':''}>${esc(p.name)} (${p.type==='supplier'?'مورد':'عميل'})</option>`).join('');
 function openParty(type='customer',id=''){
  const old=id?getParty(id):null;
@@ -331,9 +331,53 @@ async function shareWhatsapp(phone,text){
  }catch(e){toast(e.message);}
 }
 
+let waPairingTimer=null,waMode='qr';
+function stopWaPairingPolling(){if(waPairingTimer){clearInterval(waPairingTimer);waPairingTimer=null;}}
+async function refreshWaPairing(){
+ const view=$('wa-root-pair');if(!view||!view.isConnected){stopWaPairingPolling();return;}
+ const native=window.Capacitor?.Plugins?.QatfahNative;
+ if(!native?.whatsappPairingStatus)return;
+ try{
+  const r=await native.whatsappPairingStatus();
+  const label=$('wa-root-state');if(!label)return;
+  if(r.status==='connected'){
+   label.textContent='🟢 واتساب متصل وجاهز للإرسال';
+   whatsappLinkState='connected';renderWhatsappBadge();
+   $('wa-root-qr').hidden=true;$('wa-root-phone').hidden=true;
+   $('wa-root-connected').hidden=false;return;
+  }
+  $('wa-root-connected').hidden=true;
+  label.textContent=r.status==='not_linked'?'يلزم إكمال ربط واتساب':r.status==='offline'?'لا يوجد اتصال بالإنترنت':'جاري فحص جلسة واتساب...';
+  if(waMode==='qr'){
+   $('wa-root-qr').hidden=false;$('wa-root-phone').hidden=true;
+   const image=$('wa-root-qr-image');
+   if(r.qr?.startsWith('data:image/png;base64,')){image.src=r.qr;image.hidden=false;$('wa-root-qr-note').hidden=true;}
+   else{$('wa-root-qr-note').hidden=false;image.hidden=true;}
+  }
+  if(r.code&&waMode==='phone')$('wa-root-code').textContent=r.code;
+ }catch(err){const label=$('wa-root-state');if(label)label.textContent=err.message;}
+}
 function openWhatsapp(){
- showSheet('ربط واتساب في قطفة',`<div class="qr-box"><h3>ربط واتساب</h3><p class="hint">تظهر شاشة صغيرة للباركود أو رمز الهاتف وحالة الاتصال فقط، دون عرض صفحة المحادثات داخل قطفة. قد يمنع واتساب استخراج الرمز من WebView غير رسمي.</p><button type="button" id="wa-native" class="btn btn-primary">فتح شاشة QR / رمز الربط</button><p class="hint">إرسال PDF من الفواتير والكشوف يتم من الزر مباشرة داخل جلسة واتساب المدمجة، دون نافذة مشاركة. قد يتوقف إذا تغيّرت واجهة واتساب؛ عدم تأكيد الإرسال يظهر كخطأ.</p></div>`);
- $('wa-native').onclick=async()=>{try{const p=window.Capacitor?.Plugins?.QatfahNative;if(!p?.openWhatsAppWeb)throw Error('شاشة الربط المدمجة متاحة على Android فقط');await p.openWhatsAppWeb();}catch(e){toast(e.message)}};
+ stopWaPairingPolling();waMode='qr';
+ showSheet('ربط واتساب',`<div id="wa-root-pair" class="qr-box">
+ <h3 id="wa-root-state">جاري فحص الجلسة...</h3>
+ <div id="wa-root-connected" hidden><p>واتساب متصل بالنظام. يمكنك فتح أي قسم وإرسال المستندات.</p></div>
+ <div id="wa-root-qr"><div style="min-height:210px;display:grid;place-items:center"><img id="wa-root-qr-image" hidden alt="رمز QR لواتساب" style="width:min(100%,260px);height:auto"/><p id="wa-root-qr-note">جاري تحميل الباركود...</p></div>
+ <button id="wa-root-switch-phone" type="button" class="btn btn-primary btn-block">الربط برقم الهاتف والرمز</button></div>
+ <div id="wa-root-phone" hidden><label>رقم واتساب مع مفتاح اليمن +967<input id="wa-root-number" type="tel" inputmode="numeric" dir="ltr" placeholder="+9677XXXXXXXX"></label>
+ <button id="wa-root-request" type="button" class="btn btn-primary btn-block">طلب رمز الربط</button>
+ <div id="wa-root-code" dir="ltr" style="font-size:27px;letter-spacing:5px;font-weight:bold;text-align:center;padding:18px">···· ····</div>
+ <button id="wa-root-switch-qr" type="button" class="btn btn-light btn-block">العودة للباركود</button></div>
+ </div>`);
+ $('wa-root-switch-phone').onclick=()=>{waMode='phone';$('wa-root-qr').hidden=true;$('wa-root-phone').hidden=false;};
+ $('wa-root-switch-qr').onclick=()=>{waMode='qr';$('wa-root-phone').hidden=true;refreshWaPairing();};
+ $('wa-root-request').onclick=async()=>{
+  const button=$('wa-root-request');button.disabled=true;
+  try{const phone=fixWhatsappNumber($('wa-root-number').value);await window.Capacitor.Plugins.QatfahNative.whatsappPairingPhone({phone});toast('تم طلب رمز الربط، انتظر ظهوره');}
+  catch(err){toast(err.message);}finally{button.disabled=false;}
+ };
+ refreshWaPairing().catch(()=>{});
+ waPairingTimer=setInterval(refreshWaPairing,5000);
 }
 
 async function resizeLogo(file){if(file.size>5e6)throw Error('الصورة كبيرة جدًا');const image=new Image(),url=URL.createObjectURL(file);try{image.src=url;await image.decode();const scale=Math.min(360/image.width,360/image.height,1),canvas=document.createElement('canvas');canvas.width=Math.max(1,Math.round(image.width*scale));canvas.height=Math.max(1,Math.round(image.height*scale));const ctx=canvas.getContext('2d');ctx.fillStyle='#ffffff';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(image,0,0,canvas.width,canvas.height);return canvas.toDataURL('image/jpeg',.80);}finally{URL.revokeObjectURL(url);}}
