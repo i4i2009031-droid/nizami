@@ -2,6 +2,16 @@
 export const REGISTRY_URL='https://raw.githubusercontent.com/i4i2009031-droid/nizami/main/users.json';
 export const REGISTRY_API='https://api.github.com/repos/i4i2009031-droid/nizami/contents/users.json';
 export const HASH_ROUNDS=240000;
+const registryDateFormatter=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Aden',year:'numeric',month:'2-digit',day:'2-digit'});
+export function subscriptionDate(date=new Date()){
+ const parts=Object.fromEntries(registryDateFormatter.formatToParts(date).map(p=>[p.type,p.value]));
+ return `${parts.year}-${parts.month}-${parts.day}`;
+}
+export function isSubscriptionActive(user,date=new Date()){
+ if(user?.active!==true||typeof user.id!=='string'||!user.id||!/^\d{4}-\d{2}-\d{2}$/.test(user.expiresAt||''))return false;
+ const expiry=new Date(user.expiresAt+'T00:00:00Z');
+ return Number.isFinite(expiry.getTime())&&expiry.toISOString().slice(0,10)===user.expiresAt&&user.expiresAt>=subscriptionDate(date);
+}
 export function randomHex(bytes=16){const b=new Uint8Array(bytes);crypto.getRandomValues(b);return Array.from(b,x=>x.toString(16).padStart(2,'0')).join('');}
 export async function hashPassword(password,salt,rounds=HASH_ROUNDS){
  if(!/^[0-9a-f]{32}$/.test(salt)||!Number.isInteger(rounds)||rounds<240000||rounds>600000)throw Error('إعداد التحقق غير صالح');
@@ -21,6 +31,6 @@ export async function authenticate(username,password){
  if(!user||!user.passwordHash||!user.salt)throw Error('بيانات الدخول غير صحيحة');
  const digest=await hashPassword(String(password),user.salt,user.rounds);
  if(!equalSecret(digest,user.passwordHash))throw Error('بيانات الدخول غير صحيحة');
- if(!user.active||user.expiresAt<new Date().toISOString().slice(0,10))throw Error('الاشتراك موقوف أو منتهي');
+ if(!isSubscriptionActive(user))throw Error('الاشتراك موقوف أو منتهي');
  return {id:user.id,username:user.username,storeName:user.storeName||user.username,expiresAt:user.expiresAt};
 }

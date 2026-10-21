@@ -1,69 +1,93 @@
 package com.qatfah.accounting;
 
 import android.app.Activity;
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.ViewParent;
-import android.view.Gravity;
-import android.graphics.Color;
-import android.widget.TextView;
-import android.widget.LinearLayout;
-import android.webkit.WebChromeClient;
-import android.widget.FrameLayout;
 import android.webkit.CookieManager;
+import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
+import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
-import android.webkit.WebResourceRequest;
-import android.net.Uri;
-import com.getcapacitor.PluginCall;
+import android.widget.FrameLayout;
+import androidx.webkit.WebStorageCompat;
+import androidx.webkit.WebViewFeature;
 import com.getcapacitor.JSObject;
-import org.json.JSONObject;
+import com.getcapacitor.PluginCall;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.json.JSONObject;
 
-/** Best-effort, in-process WhatsApp Web companion. No external window or sharesheet.
- * Never reports delivery confirmed; DOM changes and WebView blocking must be handled.
+/** One Activity-owned surface independent of Capacitor routes and dialogs.
+ * Saved pairing, live transport readiness and confirmed delivery are distinct.
  */
 public final class QatfahWhatsappDirect {
+ private static final String URL="https://web.whatsapp.com/";
+ private static final String ORIGIN="https://web.whatsapp.com";
+ private static final String LINKED_KEY="WA_PERMANENTLY_LINKED";
+ private static final String REVOKED_KEY="WA_AUTH_REVOKED";
+ private static final String RETRY_KEY="WA_EXPLICIT_RETRY_REQUIRED";
+ private static final String LOGOUT_PENDING_KEY="WA_LOGOUT_PENDING";
  private static QatfahWhatsappDirect shared;
  private final Activity activity;
- private FrameLayout parkedFrame;
- private LinearLayout pairingToolbar;
- private boolean pairingPageVisible=false;
- private String lastLoadError="";
- private long lastPageStart=0L;
- private boolean inLinkScreen=false;
- private boolean chatVisible=false;
- private long lastLinkedAt=0L;
+ private final SharedPreferences preferences;
  private final Handler handler=new Handler(Looper.getMainLooper());
+ private FrameLayout parkedFrame;
  private WebView web;
- private PluginCall pending;
  private String script;
- private boolean loaded=false,injected=false,uploading=false,atRecipient=false;
- private long startedAt;
- /** Match the installed Chromium engine rather than claim an obsolete Chrome 131. */
+ private boolean released=false,loaded=false,injected=false,uploading=false;
+ private boolean permanentlyLinked,authRevoked,requiresRetry;
+ private boolean authenticated=false,transportReady=false,probing=false,cleanupInProgress=false;
+ private String transportStatus="not_started",lastLoadError="";
+ private long lastLinkedAt=0L,documentGeneration=0L,sendGeneration=0L;
+ private PluginCall pending,pairingCall,logoutCall;
+ private boolean driverMayHaveStarted=false;
+ private Runnable sendDeadline,logoutDeadline;
+
+ private QatfahWhatsappDirect(Activity activity){
+  this.activity=activity;
+  preferences=activity.getApplicationContext().getSharedPreferences("qatfah_whatsapp",Context.MODE_PRIVATE);
+  permanentlyLinked=preferences.getBoolean(LINKED_KEY,false);
+  authRevoked=preferences.getBoolean(REVOKED_KEY,false);
+  requiresRetry=preferences.getBoolean(RETRY_KEY,false);
+ }
+ /** UI-thread singleton: an obsolete Activity is never retained by a new owner. */
+ public static QatfahWhatsappDirect forActivity(Activity activity){
+  if(Looper.myLooper()!=Looper.getMainLooper())throw new IllegalStateException("WhatsApp requires the UI thread");
+  if(shared!=null&&(shared.released||shared.activity!=activity)){
+   QatfahWhatsappDirect obsolete=shared;shared=null;obsolete.release();
+  }
+  if(shared==null)shared=new QatfahWhatsappDirect(activity);
+  return shared;
+ }
+ public static QatfahWhatsappDirect getShared(){return shared;}
+ private int dp(int value){return Math.round(value*activity.getResources().getDisplayMetrics().density);}
  private static String desktopUserAgent(Activity activity){
-  String systemUa=WebSettings.getDefaultUserAgent(activity);
-  Matcher match=Pattern.compile("Chrome/([0-9.]+)").matcher(systemUa);
+  Matcher match=Pattern.compile("Chrome/([0-9.]+)").matcher(WebSettings.getDefaultUserAgent(activity));
   String version=match.find()?match.group(1):"131.0.0.0";
   return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+version+" Safari/537.36";
  }
- private int dp(int value){return Math.round(value*activity.getResources().getDisplayMetrics().density);}
-
- public QatfahWhatsappDirect(Activity activity){this.activity=activity;shared=this;}
- public static QatfahWhatsappDirect getShared(){return shared;}
- private void init() throws Exception{
-  if(web!=null)return;
-  try(InputStream in=activity.getAssets().open("whatsapp-direct.js")){
-    byte[] bytes=new byte[in.available()];
-    int off=0,n;while(off<bytes.length&&(n=in.read(bytes,off,bytes.length-off))>0)off+=n;
-    script=new String(bytes,0,off,StandardCharsets.UTF_8);
+ private void init() throws Exception {
+  if(released)throw new IllegalStateException("Activity has been destroyed");
+  if(web!=null||requiresRetry||cleanupInProgress||preferences.getBoolean(LOGOUT_PENDING_KEY,false))return;
+  if(script==null){
+   try(InputStream in=activity.getAssets().open("whatsapp-direct.js");ByteArrayOutputStream out=new ByteArrayOutputStream()){
+    byte[] buffer=new byte[8192];int length;
+    while((length=in.read(buffer))!=-1)out.write(buffer,0,length);
+    script=new String(out.toByteArray(),StandardCharsets.UTF_8);
+   }
   }
+  ViewGroup host=activity.findViewById(android.R.id.content);
+  if(host==null)throw new IllegalStateException("Activity root is not ready");
   web=new WebView(activity);
   WebSettings settings=web.getSettings();
   settings.setJavaScriptEnabled(true);settings.setDomStorageEnabled(true);
@@ -74,268 +98,329 @@ public final class QatfahWhatsappDirect {
   settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
   CookieManager.getInstance().setAcceptCookie(true);
   CookieManager.getInstance().setAcceptThirdPartyCookies(web,true);
-  web.setAlpha(0.01f);
-  web.setVisibility(View.VISIBLE);
-  ViewGroup host=activity.findViewById(android.R.id.content);
+  web.setAlpha(0.01f);web.setVisibility(View.VISIBLE);
+  web.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
   parkedFrame=new FrameLayout(activity);
   parkedFrame.setClipChildren(true);parkedFrame.setClipToPadding(true);
-  FrameLayout.LayoutParams desktopSize=new FrameLayout.LayoutParams((int)(1100*activity.getResources().getDisplayMetrics().density),(int)(800*activity.getResources().getDisplayMetrics().density));
-  parkedFrame.addView(web,desktopSize);
-  FrameLayout.LayoutParams params=new FrameLayout.LayoutParams(2,2,android.view.Gravity.BOTTOM|android.view.Gravity.RIGHT);
-  host.addView(parkedFrame,params);
-  installWebClient();
-  web.loadUrl("https://web.whatsapp.com/");
-  handler.postDelayed(new Runnable(){@Override public void run(){
-   if(web!=null&&pending==null&&!inLinkScreen)web.evaluateJavascript("document.readyState",null);
-   handler.postDelayed(this,5000);
-  }},5000);
+  parkedFrame.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+  // Clip only presentation; never resize the desktop child on modal/router changes.
+  parkedFrame.addView(web,new FrameLayout.LayoutParams(dp(1100),dp(800)));
+  host.addView(parkedFrame,0,new FrameLayout.LayoutParams(dp(2),dp(2),Gravity.BOTTOM|Gravity.RIGHT));
+  installWebClient();transportStatus="loading";
+  web.loadUrl(URL); // Initial startup only; sends and UI observation never navigate.
+  handler.removeCallbacks(sessionObserver);handler.postDelayed(sessionObserver,1500);
  }
+ public void ensureRunning() throws Exception {
+  if(preferences.getBoolean(LOGOUT_PENDING_KEY,false)){
+   if(!cleanupInProgress)startSiteLogout(null);
+   return;
+  }
+  init();
+ }
+ private final Runnable sessionObserver=new Runnable(){@Override public void run(){
+  if(released)return;
+  observeSession();handler.postDelayed(this,3500);
+ }};
  private void installWebClient(){
   web.setWebViewClient(new WebViewClient(){
-    @Override public void onPageStarted(WebView view,String url,android.graphics.Bitmap favicon){
-      loaded=false;lastLoadError="";lastPageStart=System.currentTimeMillis();
-    }
-    @Override public void onReceivedError(WebView view,WebResourceRequest request,android.webkit.WebResourceError error){
-      if(request.isForMainFrame())lastLoadError=String.valueOf(error.getDescription());
-    }
-    @Override public void onPageFinished(WebView view,String url){
-      if(!url.startsWith("https://web.whatsapp.com/"))return;
-      loaded=true;injected=false;
-      if(pending!=null){if(atRecipient)handler.postDelayed(()->injectAndSend(),1400);else navigate(pending.getString("phone",""),pending.getString("caption",""));}
-    }
-    @Override public boolean shouldOverrideUrlLoading(WebView view,WebResourceRequest request){
-      Uri url=request.getUrl();return !("https".equals(url.getScheme())&&"web.whatsapp.com".equals(url.getHost()));
-    }
+   @Override public void onPageStarted(WebView view,String url,android.graphics.Bitmap favicon){
+    documentGeneration++;loaded=false;injected=false;probing=false;
+    authenticated=false;transportReady=false;transportStatus="loading";lastLoadError="";
+    if(pending!=null)finishFailure("تغيرت صفحة واتساب أثناء الإرسال؛ راجع المحادثة قبل إعادة المحاولة",!driverMayHaveStarted);
+   }
+   @Override public void onReceivedError(WebView view,WebResourceRequest request,android.webkit.WebResourceError error){
+    if(!request.isForMainFrame())return;
+    lastLoadError=String.valueOf(error.getDescription());authenticated=false;transportReady=false;
+    transportStatus="reconnecting"; // Network failure never clears saved pairing.
+   }
+   @Override public void onPageFinished(WebView view,String url){
+    if(released||view!=web||!isWhatsAppUrl(url))return;
+    loaded=true;injected=false;observeSession();
+   }
+   @Override public boolean shouldOverrideUrlLoading(WebView view,WebResourceRequest request){
+    return !isWhatsAppUrl(request.getUrl().toString());
+   }
   });
  }
- public void showPairingPage(PluginCall call){
-  activity.runOnUiThread(()->{
-   try{
-    init();
-    if(pending!=null){call.reject("هناك إرسال جارٍ؛ لا يمكن فتح شاشة الربط الآن");return;}
-    if(!pairingPageVisible){
-      pairingPageVisible=true;
-      parkedFrame.setLayoutParams(new FrameLayout.LayoutParams(-1,-1,Gravity.TOP));
-      parkedFrame.setAlpha(1f);parkedFrame.setBackgroundColor(Color.WHITE);
-      web.setAlpha(1f);
-      FrameLayout.LayoutParams webSize=new FrameLayout.LayoutParams(-1,-1);
-      webSize.topMargin=dp(58);
-      web.setLayoutParams(webSize);
-      pairingToolbar=new LinearLayout(activity);
-      pairingToolbar.setBackgroundColor(Color.rgb(236,246,242));
-      pairingToolbar.setGravity(Gravity.CENTER_VERTICAL);
-      pairingToolbar.setOrientation(LinearLayout.HORIZONTAL);
-      TextView close=new TextView(activity);
-      close.setText("✕  العودة إلى قطفة");close.setTextSize(15);close.setTextColor(Color.rgb(0,101,77));
-      close.setGravity(Gravity.CENTER);close.setOnClickListener(v->hidePairingPage());
-      pairingToolbar.addView(close,new LinearLayout.LayoutParams(0,dp(56),2f));
-      TextView refresh=new TextView(activity);
-      refresh.setText("تحديث");refresh.setTextSize(14);refresh.setTextColor(Color.rgb(0,101,77));
-      refresh.setGravity(Gravity.CENTER);refresh.setOnClickListener(v->{if(pending==null)web.reload();});
-      pairingToolbar.addView(refresh,new LinearLayout.LayoutParams(0,dp(56),1f));
-      parkedFrame.addView(pairingToolbar,new FrameLayout.LayoutParams(-1,dp(58),Gravity.TOP));
-      parkedFrame.bringToFront();
-    }
-    JSObject out=new JSObject();out.put("visible",true);call.resolve(out);
-   }catch(Exception e){call.reject("تعذر عرض صفحة واتساب",e);}
+ private static boolean isWhatsAppUrl(String value){
+  Uri url=Uri.parse(value);return "https".equals(url.getScheme())&&"web.whatsapp.com".equals(url.getHost());
+ }
+ // Passive live probe: no QR extraction, clicks, reload, or authentication request.
+ // A missing selector cannot revoke the latch. A visible signed-out screen can.
+ private static final String SESSION_STATE="(function(){try{"+
+  "var visible=function(n){return !!n&&!!n.getClientRects().length&&getComputedStyle(n).visibility!=='hidden'};"+
+  "var revoked=[].some.call(document.querySelectorAll('[data-testid=logged-out],[data-testid=logout-screen]'),function(n){return visible(n)&&/you (?:have been|were) logged out|you.re logged out|تم تسجيل خروجك|تم تسجيل الخروج من حسابك/i.test(n.innerText||'')});"+
+  "if(revoked)return JSON.stringify({status:'not_linked',authRevoked:true});"+
+  "if(!navigator.onLine)return JSON.stringify({status:'offline'});"+
+  "var auth=[].some.call(document.querySelectorAll('#pane-side,[data-testid=chat-list],[data-testid=chatlist-header],#main footer'),visible);"+
+  "var reconnect=[].some.call(document.querySelectorAll('[data-testid=alert-phone],[data-testid=alert-computer],[data-testid=connection-status],[role=alert]'),function(n){return visible(n)&&/reconnecting|connecting|trying to reach|computer not connected|phone not connected|إعادة الاتصال|جار.*الاتصال|غير متصل/i.test(n.innerText||'')});"+
+  "if(auth&&!reconnect)return JSON.stringify({status:'connected',authenticated:true,transportReady:true});"+
+  "return JSON.stringify({status:document.readyState==='loading'?'loading':'reconnecting'});"+
+  "}catch(e){return JSON.stringify({status:'unknown'})}})()";
+ private void observeSession(){
+  if(web==null||released||requiresRetry||probing||!loaded)return;
+  probing=true;final WebView observed=web;final long generation=documentGeneration;
+  observed.evaluateJavascript(SESSION_STATE,value->{
+   if(released||observed!=web||generation!=documentGeneration)return;
+   probing=false;
+   try{applySessionState(new JSONObject(decode(value)));}catch(Exception ignored){
+    authenticated=false;transportReady=false;transportStatus="unknown";
+   }
   });
  }
- public void hidePairingPage(){
-  activity.runOnUiThread(()->{
-   if(!pairingPageVisible||parkedFrame==null||web==null)return;
-   if(pairingToolbar!=null)parkedFrame.removeView(pairingToolbar);
-   pairingToolbar=null;pairingPageVisible=false;
-   FrameLayout.LayoutParams parkedWeb=new FrameLayout.LayoutParams(dp(1100),dp(800));
-   web.setLayoutParams(parkedWeb);web.setAlpha(0.01f);
-   parkedFrame.setAlpha(0.01f);parkedFrame.setBackgroundColor(Color.TRANSPARENT);
-   parkedFrame.setLayoutParams(new FrameLayout.LayoutParams(dp(2),dp(2),Gravity.BOTTOM|Gravity.RIGHT));
-   CookieManager.getInstance().flush();
-  });
- }
- public void hidePairingPage(PluginCall call){hidePairingPage();call.resolve();}
- public void retryLoading(PluginCall call){
-  activity.runOnUiThread(()->{
-   try{init();if(pending!=null){call.reject("إرسال جارٍ");return;}
-     lastLoadError="";lastPageStart=System.currentTimeMillis();
-     web.reload();call.resolve();
-   }catch(Exception e){call.reject("تعذر تحديث صفحة واتساب",e);}
-  });
- }
- public void ensureRunning() throws Exception {init();}
- /** The QR screen observes the same WebView without detaching or reloading it. */
- public WebView takeForLinking() throws Exception {
-  init();
-  if(pending!=null)return null;
-  inLinkScreen=true;
-  return web;
- }
- /** Manual chats are optional: only detach on explicit request to display them. */
- public boolean detachForChat(WebView requested){
-  if(requested!=web||!inLinkScreen||pending!=null)return false;
-  ViewParent old=web.getParent();
-  if(old instanceof ViewGroup)((ViewGroup)old).removeView(web);
-  chatVisible=true;
-  return true;
- }
- public void returnFromLinking(WebView borrowed){
-  if(borrowed==null||borrowed!=web||parkedFrame==null)return;
-  if(chatVisible){
-   ViewParent old=web.getParent();
-   if(old instanceof ViewGroup)((ViewGroup)old).removeView(web);
-   FrameLayout.LayoutParams desktop=new FrameLayout.LayoutParams(
-    (int)(1100*activity.getResources().getDisplayMetrics().density),
-    (int)(800*activity.getResources().getDisplayMetrics().density));
-   parkedFrame.addView(web,desktop);
-   web.setWebChromeClient(new WebChromeClient());
-   installWebClient();
+ private void applySessionState(JSONObject state){
+  if(requiresRetry)return;
+  if(state.optBoolean("authRevoked",false)){
+   permanentlyLinked=false;authRevoked=true;requiresRetry=true;
+   preferences.edit().putBoolean(LINKED_KEY,false).putBoolean(REVOKED_KEY,true).putBoolean(RETRY_KEY,true).apply();
+  }else if(state.optBoolean("authenticated",false)){
+   boolean changed=!permanentlyLinked||authRevoked;
+   permanentlyLinked=true;authRevoked=false;lastLinkedAt=System.currentTimeMillis();
+   if(changed){
+    preferences.edit().putBoolean(LINKED_KEY,true).putBoolean(REVOKED_KEY,false).apply();
+    CookieManager.getInstance().flush();
+   }
   }
-  web.setAlpha(0.01f);
-  chatVisible=false;inLinkScreen=false;atRecipient=false;
-  CookieManager.getInstance().flush();
+  authenticated=state.optBoolean("authenticated",false)&&!authRevoked;
+  transportReady=authenticated&&state.optBoolean("transportReady",false);
+  transportStatus=state.optString("status","unknown");
+  if("connected".equals(transportStatus)&&!transportReady)transportStatus="reconnecting";
  }
- public void getConnectionStatus(PluginCall call){
-  activity.runOnUiThread(()->{
-   if(web==null){JSObject out=new JSObject();out.put("status","not_started");call.resolve(out);return;}
-   String js="(function(){try{"+
-    "if(!navigator.onLine)return 'offline';"+
-    "if(document.querySelector('#pane-side,[data-testid=chat-list],[data-testid=chatlist-header],#main footer'))return 'connected';"+
-    "if(document.querySelector('[data-testid*=qr] canvas,canvas[aria-label*=QR]'))return 'not_linked';"+
-    "return document.readyState==='loading'?'loading':'reconnecting';"+
-    "}catch(e){return 'unknown'}})()";
-   web.evaluateJavascript(js,value->{
-    String status=decode(value);
-    if("connected".equals(status))lastLinkedAt=System.currentTimeMillis();
-    else if("reconnecting".equals(status)&&lastLinkedAt>0L)status="reconnecting";
-    if(inLinkScreen&&!"connected".equals(status)&&!"offline".equals(status))status="linking";
-    JSObject out=new JSObject();out.put("status",status);
-    out.put("sessionAlive",true);
-    out.put("previouslyLinked",lastLinkedAt>0L);
-    call.resolve(out);
-   });
-  });
+ private JSObject snapshot(){
+  // A deletion callback from an obsolete Activity may finish after recreation.
+  permanentlyLinked=preferences.getBoolean(LINKED_KEY,permanentlyLinked);
+  authRevoked=preferences.getBoolean(REVOKED_KEY,authRevoked);
+  requiresRetry=preferences.getBoolean(RETRY_KEY,requiresRetry);
+  if(authRevoked||requiresRetry){authenticated=false;transportReady=false;}
+  boolean logoutPending=cleanupInProgress||preferences.getBoolean(LOGOUT_PENDING_KEY,false);
+  JSObject out=new JSObject();out.put("status",logoutPending?"logging_out":requiresRetry?"not_linked":transportStatus);
+  out.put("linked",permanentlyLinked);out.put("previouslyLinked",permanentlyLinked);
+  out.put("authenticated",authenticated);out.put("transportReady",transportReady);
+  out.put("authRevoked",authRevoked);out.put("requiresRetry",requiresRetry);
+  out.put("logoutPending",logoutPending);
+  out.put("sessionAlive",web!=null&&!released);out.put("lastLinkedAt",lastLinkedAt);
+  if(!lastLoadError.isEmpty())out.put("error",lastLoadError);
+  return out;
  }
+ /** Pure cache read; badge and modal refreshes cannot start authentication. */
+ public void getConnectionStatus(PluginCall call){activity.runOnUiThread(()->call.resolve(snapshot()));}
  private static final String PAIRING_STATE="(function(){try{"+
-  "if(document.querySelector('#pane-side,[data-testid=chat-list],[data-testid=chatlist-header],#main footer'))return JSON.stringify({status:'connected'});"+
-  "var canv=[...document.querySelectorAll('canvas')].find(x=>x.width>=140&&x.height>=140);"+
+  "var visible=function(n){return !!n&&!!n.getClientRects().length&&getComputedStyle(n).visibility!=='hidden'};"+
+  "if(navigator.onLine&&[].some.call(document.querySelectorAll('#pane-side,[data-testid=chat-list],[data-testid=chatlist-header],#main footer'),visible))return JSON.stringify({status:'connected',authenticated:true,transportReady:true});"+
+  "var canv=[].find.call(document.querySelectorAll('[data-testid*=qr] canvas,canvas[aria-label*=QR],[data-ref] canvas'),function(x){return visible(x)&&x.width>=140&&x.height>=140});"+
   "var qr='';if(canv){try{qr=canv.toDataURL('image/png')}catch(e){}}"+
-  "var code='';for(var el of document.querySelectorAll('div,span,strong')){var t=(el.textContent||'').trim();if(el.children.length===0&&/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(t)){code=t;break}}"+
-  "return JSON.stringify({status:qr?'not_linked':'checking',qr:qr,code:code})"+
+  "var code='';for(var el of document.querySelectorAll('div,span,strong')){var t=(el.textContent||'').trim();if(visible(el)&&el.children.length===0&&/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(t)){code=t;break}}"+
+  "return JSON.stringify({status:qr?'not_linked':'checking',qr:qr,code:code});"+
   "}catch(e){return JSON.stringify({status:'unknown'})}})()";
  public void pairingStatus(PluginCall call){
   activity.runOnUiThread(()->{
-   try{init();web.evaluateJavascript(PAIRING_STATE,value->{
-    try{JSONObject state=new JSONObject(decode(value));JSObject out=new JSObject();
-     out.put("status",state.optString("status","unknown"));
-     String qr=state.optString("qr","");
-     out.put("qr",qr.length()<500000?qr:"");
+   // The latch short circuit precedes every DOM/QR operation.
+   if(permanentlyLinked||requiresRetry||web==null||released){call.resolve(snapshot());return;}
+   final WebView observed=web;final long generation=documentGeneration;
+   observed.evaluateJavascript(PAIRING_STATE,value->{
+    if(released||observed!=web||generation!=documentGeneration||permanentlyLinked||requiresRetry){call.resolve(snapshot());return;}
+    try{
+     JSONObject state=new JSONObject(decode(value));
+     if(state.optBoolean("authenticated",false)){applySessionState(state);call.resolve(snapshot());return;}
+     JSObject out=snapshot();out.put("status",state.optString("status","unknown"));
+     String qr=state.optString("qr","");out.put("qr",qr.length()<500000?qr:"");
      out.put("code",state.optString("code",""));call.resolve(out);
-    }catch(Exception e){call.reject("تعذر فحص الربط",e);}
-   });}catch(Exception e){call.reject("تعذر تشغيل واتساب",e);}
+    }catch(Exception e){call.reject("تعذر قراءة بيانات الربط",e);}
+   });
   });
  }
  public void pairingPhone(PluginCall call,String phone){
   activity.runOnUiThread(()->{
+   if(permanentlyLinked){call.resolve(snapshot());return;}
    if(!phone.matches("[0-9]{9,15}")){call.reject("رقم غير صحيح");return;}
-   if(pending!=null){call.reject("عملية إرسال جارية");return;}
-   try{init();String js="(function(){var b=[...document.querySelectorAll('button,[role=button]')].find(x=>/link with phone|phone number|رقم الهاتف|ربط.*رقم/i.test(x.innerText||x.textContent||''));if(b){b.click();return 'ok'}return 'no'})()";
-    web.evaluateJavascript(js,value->handler.postDelayed(()->fillPairingPhone(phone,call,0),1500));
-   }catch(Exception e){call.reject("تعذر طلب الرمز",e);}
+   if(pending!=null||pairingCall!=null||preferences.getBoolean(LOGOUT_PENDING_KEY,false)){call.reject("هناك عملية واتساب جارية");return;}
+   if(web==null||requiresRetry||!loaded){call.reject("اضغط تحديث لبدء جلسة الربط أولًا");return;}
+   pairingCall=call;final long generation=documentGeneration;
+   String js="(function(){var b=[...document.querySelectorAll('button,[role=button]')].find(x=>/link with phone|phone number|رقم الهاتف|ربط.*رقم/i.test(x.innerText||x.textContent||''));if(b){b.click();return 'ok'}return 'no'})()";
+   web.evaluateJavascript(js,value->handler.postDelayed(()->fillPairingPhone(phone,call,generation,0),1200));
   });
  }
- private void fillPairingPhone(String phone,PluginCall call,int attempt){
+ private void fillPairingPhone(String phone,PluginCall call,long generation,int attempt){
+  if(pairingCall!=call)return;
+  if(permanentlyLinked){pairingCall=null;call.resolve(snapshot());return;}
+  if(released||web==null||generation!=documentGeneration){pairingCall=null;call.reject("تغيرت جلسة الربط؛ حاول مرة أخرى");return;}
   String js="(function(){var x=document.querySelector('input[type=tel],input[inputmode=tel]');if(!x)return 'waiting';"+
    "var setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;setter.call(x,"+JSONObject.quote(phone)+");"+
-   "x.dispatchEvent(new Event('input',{bubbles:true}));"+
+   "x.dispatchEvent(new Event('input',{bubbles:true}));x.dispatchEvent(new Event('change',{bubbles:true}));"+
    "var btn=[...document.querySelectorAll('button,[role=button]')].find(b=>/next|التالي|continue|متابعة/i.test(b.innerText||b.textContent||''));"+
    "if(btn&&!btn.disabled){btn.click();return 'sent'}return 'waiting'})()";
   web.evaluateJavascript(js,value->{
-   if(value.contains("sent")){JSObject out=new JSObject();out.put("requested",true);call.resolve(out);}
-   else if(attempt<7)handler.postDelayed(()->fillPairingPhone(phone,call,attempt+1),1200);
-   else call.reject("واتساب لم يوفر حقل الربط بالرقم");
+   if(pairingCall!=call)return;
+   if("sent".equals(decode(value))){pairingCall=null;JSObject out=new JSObject();out.put("requested",true);call.resolve(out);}
+   else if(attempt<7)handler.postDelayed(()->fillPairingPhone(phone,call,generation,attempt+1),1200);
+   else{pairingCall=null;call.reject("واتساب لم يوفر حقل الربط بالرقم");}
   });
  }
- private void fail(String message){
-  PluginCall call=pending;pending=null;uploading=false;
-  if(call!=null)call.reject(message);
+ /** Only an explicit retry reloads. It never clears a saved pairing. */
+ public void retryLoading(PluginCall call){
+  activity.runOnUiThread(()->{
+   if(pending!=null||pairingCall!=null||cleanupInProgress||preferences.getBoolean(LOGOUT_PENDING_KEY,false)){
+    call.reject("هناك عملية واتساب جارية؛ انتظر اكتمالها قبل إعادة التحميل");return;
+   }
+   try{
+    requiresRetry=false;preferences.edit().putBoolean(RETRY_KEY,false).apply();lastLoadError="";
+    if(web==null)init();else web.reload();call.resolve(snapshot());
+   }catch(Exception e){call.reject("تعذر تحديث واتساب",e);}
+  });
+ }
+ // Legacy endpoints cannot reveal or reparent the WhatsApp page.
+ public void showPairingPage(PluginCall call){call.reject("الربط متاح من نافذة QR أو رمز الهاتف داخل قطفة");}
+ public void hidePairingPage(){}
+ public void hidePairingPage(PluginCall call){call.resolve();}
+ public WebView takeForLinking(){return null;}
+ public boolean detachForChat(WebView requested){return false;}
+ public void returnFromLinking(WebView borrowed){}
+ /** Explicit local logout waits for Chromium's site-deletion completion callback. */
+ public void logout(PluginCall call){
+  activity.runOnUiThread(()->startSiteLogout(call));
+ }
+ private void startSiteLogout(PluginCall call){
+  if(cleanupInProgress){if(call!=null)call.reject("تسجيل الخروج جارٍ بالفعل");return;}
+  if(!WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA)){
+   lastLoadError="حدّث Android System WebView لإتمام تسجيل الخروج بأمان";
+   if(call!=null)call.reject(lastLoadError);return;
+  }
+  if(pending!=null)finishFailure("أوقفت عملية الإرسال لتسجيل الخروج؛ راجع المحادثة قبل إعادة المحاولة",!driverMayHaveStarted);
+  if(pairingCall!=null){PluginCall old=pairingCall;pairingCall=null;old.reject("تم إلغاء الربط لتسجيل الخروج");}
+  logoutCall=call;cleanupInProgress=true;requiresRetry=true;authenticated=false;transportReady=false;
+  // Keep the latch until deletion actually completes, and block startup meanwhile.
+  preferences.edit().putBoolean(LOGOUT_PENDING_KEY,true).putBoolean(RETRY_KEY,true).apply();
+  destroySurface();
+  logoutDeadline=()->{
+   lastLoadError="تنظيف جلسة واتساب لم يؤكد اكتماله بعد؛ لم يبدأ ربط جديد";
+   PluginCall waiting=logoutCall;logoutCall=null;
+   if(waiting!=null)waiting.reject(lastLoadError);
+  };
+  handler.postDelayed(logoutDeadline,20000);
+  try{
+   // Scoped to whatsapp.com: Capacitor's app origin and accounting data are untouched.
+   WebStorageCompat.deleteBrowsingDataForSite(WebStorage.getInstance(),ORIGIN,()->{
+    permanentlyLinked=false;authRevoked=true;requiresRetry=true;cleanupInProgress=false;
+    preferences.edit().putBoolean(LINKED_KEY,false).putBoolean(REVOKED_KEY,true)
+      .putBoolean(RETRY_KEY,true).putBoolean(LOGOUT_PENDING_KEY,false).apply();
+    transportStatus="not_linked";lastLoadError="";
+    if(logoutDeadline!=null)handler.removeCallbacks(logoutDeadline);logoutDeadline=null;
+    PluginCall waiting=logoutCall;logoutCall=null;if(waiting!=null)waiting.resolve(snapshot());
+   });
+  }catch(Exception error){
+   cleanupInProgress=false;handler.removeCallbacks(logoutDeadline);logoutDeadline=null;
+   lastLoadError="تعذر إكمال تنظيف جلسة واتساب؛ أعد تسجيل الخروج";
+   PluginCall waiting=logoutCall;logoutCall=null;if(waiting!=null)waiting.reject(lastLoadError,error);
+  }
  }
  private String decode(String value){
   if(value==null)return "";
-  try{return (String)new org.json.JSONTokener(value).nextValue();}catch(Exception e){return value;}
+  try{Object decoded=new org.json.JSONTokener(value).nextValue();return decoded instanceof String?(String)decoded:value;}catch(Exception e){return value;}
  }
- private void injectAndSend(){
-  if(web==null||pending==null||!loaded)return;
+ private boolean active(long generation){return pending!=null&&!released&&web!=null&&generation==sendGeneration;}
+ private JSObject sendResult(String status,String message,Boolean dispatched,boolean safeToFallback){
+  JSObject out=new JSObject();out.put("status",status);out.put("message",message);
+  out.put("dispatched",dispatched==null?JSONObject.NULL:dispatched);out.put("safeToFallback",safeToFallback);
+  out.put("deliveryConfirmed",false);return out;
+ }
+ private void finish(JSObject result){
+  PluginCall call=pending;pending=null;uploading=false;driverMayHaveStarted=false;sendGeneration++;
+  if(sendDeadline!=null)handler.removeCallbacks(sendDeadline);sendDeadline=null;
+  try{if(web!=null&&injected)web.evaluateJavascript("window.__qatfahDirect&&window.__qatfahDirect.cancel()",null);}
+  catch(Exception ignored){}
+  finally{if(call!=null)call.resolve(result);}
+ }
+ private void finishFailure(String message,boolean safeToFallback){
+  if(pending==null)return;
+  finish(sendResult(safeToFallback?"error":"uncertain",message,safeToFallback?Boolean.FALSE:null,safeToFallback));
+ }
+ private void injectAndSend(long generation){
+  if(!active(generation))return;
   if(!injected){
-   web.evaluateJavascript(script,v->{if(pending==null)return;injected=true;injectAndSend();});return;
+   web.evaluateJavascript(script,value->{
+    if(!active(generation))return;
+    if(!"true".equals(value)){finishFailure("تعذر تجهيز محرك إرسال واتساب",true);return;}
+    injected=true;injectAndSend(generation);
+   });return;
   }
-  String phone=pending.getString("phone","");
-  String caption=pending.getString("caption","");
-  String filename=pending.getString("filename","Qatfah.pdf");
   String base64=pending.getString("base64","");
   try{
-   JSONObject options=new JSONObject();options.put("phone",phone);options.put("caption",caption);
-   options.put("filename",filename);options.put("isPdf",!base64.isEmpty());
-   web.evaluateJavascript("window.__qatfahDirect.prepare("+options.toString()+")",ok->{
-    if(pending==null)return;
-    if(!"true".equals(ok)){fail("واتساب مشغول بمحاولة إرسال أخرى");return;}
-    if(base64.isEmpty()){beginSend();return;}
-    // Chunked injection avoids very large evaluateJavascript arguments.
-    int chunkSize=200000;sendChunk(base64,0,chunkSize,phone,caption);
+   JSONObject options=new JSONObject();options.put("phone",pending.getString("phone",""));
+   options.put("caption",pending.getString("caption",""));options.put("filename",pending.getString("filename","Qatfah.pdf"));
+   options.put("isPdf",!base64.isEmpty());
+   web.evaluateJavascript("window.__qatfahDirect.prepare("+options.toString()+")",value->{
+    if(!active(generation))return;
+    if(!"true".equals(value)){finishFailure("واتساب مشغول بمحاولة إرسال أخرى",false);return;}
+    if(base64.isEmpty())beginSend(generation);else sendChunk(base64,0,generation);
    });
-  }catch(Exception e){fail("تعذر تجهيز رسالة واتساب");}
+  }catch(Exception e){finishFailure("تعذر تجهيز رسالة واتساب",true);}
  }
- private void sendChunk(String b64,int index,int size,String phone,String caption){
-  if(pending==null||web==null)return;
-  if(index>=b64.length()){beginSend();return;}
-  String chunk=JSONObject.quote(b64.substring(index,Math.min(b64.length(),index+size)));
-  web.evaluateJavascript("window.__qatfahDirect.addChunk("+chunk+")",v->{
-   if(!"true".equals(v)){fail("فشل نقل مرفق PDF إلى واتساب");return;}
-   sendChunk(b64,index+size,size,phone,caption);
+ private void sendChunk(String base64,int index,long generation){
+  if(!active(generation))return;
+  if(index>=base64.length()){beginSend(generation);return;}
+  int end=Math.min(base64.length(),index+200000);
+  String chunk=JSONObject.quote(base64.substring(index,end));
+  web.evaluateJavascript("window.__qatfahDirect.addChunk("+chunk+")",value->{
+   if(!active(generation))return;
+   if(!"true".equals(value)){finishFailure("فشل نقل مرفق PDF إلى واتساب",true);return;}
+   sendChunk(base64,end,generation);
   });
  }
- private void navigate(String phone,String caption){
-  if(pending==null||web==null)return;
-  atRecipient=true;loaded=false;
-  String url="https://web.whatsapp.com/send?phone="+Uri.encode(phone);
-  web.loadUrl(url);
- }
- private void beginSend(){
-  if(pending==null||web==null)return;
-  web.evaluateJavascript("window.__qatfahDirect.start()",started->{
-   if(!"true".equals(started)){fail("تعذر بدء الإرسال داخل واتساب");return;}
-   check();
+ private void beginSend(long generation){
+  if(!active(generation))return;
+  driverMayHaveStarted=true;
+  web.evaluateJavascript("window.__qatfahDirect.start()",value->{
+   if(!active(generation))return;
+   if(!"true".equals(value)){finishFailure("تعذر تأكيد بدء الإرسال؛ راجع المحادثة قبل إعادة المحاولة",false);return;}
+   check(generation);
   });
  }
- private void check(){
-  if(pending==null||web==null)return;
-  if(System.currentTimeMillis()-startedAt>70000){fail("تعذر تأكيد الإرسال؛ راجع المحادثة قبل إعادة المحاولة");return;}
-  web.evaluateJavascript("window.__qatfahDirect&&window.__qatfahDirect.status()",v->{
-   if(pending==null)return;
+ private void check(long generation){
+  if(!active(generation))return;
+  web.evaluateJavascript("window.__qatfahDirect&&window.__qatfahDirect.status()",value->{
+   if(!active(generation))return;
    try{
-    JSONObject state=new JSONObject(decode(v));
-    String phase=state.optString("phase","");
+    JSONObject state=new JSONObject(decode(value));String phase=state.optString("phase","");
     if("submitted".equals(phase)){
-     PluginCall call=pending;pending=null;uploading=false;
-     JSObject out=new JSObject();out.put("status","submitted");out.put("deliveryConfirmed",false);
-     out.put("message","ظهرت الرسالة ضمن الرسائل الصادرة؛ لم يتأكد التسليم");
-     call.resolve(out);return;
+     finish(sendResult("submitted",state.optString("message","ظهرت الرسالة ضمن الرسائل الصادرة؛ لم يتأكد التسليم"),true,false));return;
     }
     if("error".equals(phase)||"not_linked".equals(phase)||"uncertain".equals(phase)){
-     fail(state.optString("message","تعذر تأكيد إرسال واتساب"));return;
+     boolean safe=state.has("dispatched")&&!state.optBoolean("dispatched",true)&&state.optBoolean("safeToFallback",false);
+     Boolean dispatched=state.has("dispatched")?state.optBoolean("dispatched",false):null;
+     finish(sendResult(phase,state.optString("message","تعذر تأكيد إرسال واتساب"),dispatched,safe));return;
     }
    }catch(Exception ignored){}
-   handler.postDelayed(this::check,900);
+   handler.postDelayed(()->check(generation),850);
   });
  }
  public void send(PluginCall call){
   activity.runOnUiThread(()->{
-   if(pending!=null){call.reject("يوجد إرسال جارٍ بالفعل");return;}
-   if(pairingPageVisible)hidePairingPage();
-   try{
-    pending=call;startedAt=System.currentTimeMillis();uploading=true;atRecipient=false;
-    init();
-    if(loaded)navigate(call.getString("phone",""),call.getString("caption",""));
-    else handler.postDelayed(()->{if(pending!=null&&!loaded)fail("واتساب ويب لم يحمل داخل التطبيق؛ افتح شاشة الربط أولًا");},20000);
-   }catch(Exception e){fail("تعذر بدء واتساب المدمج: "+e.getMessage());}
+   if(pending!=null||uploading){call.reject("يوجد إرسال جارٍ بالفعل");return;}
+   if(web==null||released||!loaded||requiresRetry||!permanentlyLinked){
+    call.resolve(sendResult("error","جلسة واتساب غير جاهزة للإرسال داخل قطفة",false,true));return;
+   }
+   pending=call;uploading=true;driverMayHaveStarted=false;final long generation=++sendGeneration;
+   sendDeadline=()->{if(active(generation))finishFailure("تعذر تأكيد نتيجة واتساب؛ راجع المحادثة قبل إعادة المحاولة",!driverMayHaveStarted);};
+   handler.postDelayed(sendDeadline,70000);
+   try{injectAndSend(generation);}catch(Exception e){finishFailure("تعذر بدء الإرسال داخل واتساب",!driverMayHaveStarted);}
   });
+ }
+ private void destroySurface(){
+  documentGeneration++;loaded=false;injected=false;probing=false;authenticated=false;transportReady=false;
+  WebView obsolete=web;web=null;
+  if(parkedFrame!=null){
+   if(parkedFrame.getParent() instanceof ViewGroup)((ViewGroup)parkedFrame.getParent()).removeView(parkedFrame);
+   parkedFrame.removeAllViews();parkedFrame=null;
+  }
+  if(obsolete!=null){obsolete.stopLoading();obsolete.setWebViewClient(new WebViewClient());obsolete.destroy();}
+ }
+ /** Real Android Activity destruction only; routes/modal close never call this. */
+ public void release(){
+  if(released)return;
+  if(logoutCall!=null){logoutCall.reject("أغلق أندرويد التطبيق؛ سيُستكمل تنظيف الجلسة عند فتحه");logoutCall=null;}
+  if(pending!=null)finishFailure("أغلق أندرويد جلسة التطبيق أثناء الإرسال؛ تحقق من المحادثة",!driverMayHaveStarted);
+  if(pairingCall!=null){pairingCall.reject("أغلق أندرويد شاشة التطبيق");pairingCall=null;}
+  released=true;handler.removeCallbacksAndMessages(null);CookieManager.getInstance().flush();
+  destroySurface();if(shared==this)shared=null;
  }
 }
