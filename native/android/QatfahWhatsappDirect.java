@@ -26,7 +26,7 @@ public final class QatfahWhatsappDirect {
  private WebView web;
  private PluginCall pending;
  private String script;
- private boolean loaded=false,injected=false,uploading=false;
+ private boolean loaded=false,injected=false,uploading=false,atRecipient=false;
  private long startedAt;
  private static final String UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
  public QatfahWhatsappDirect(Activity activity){this.activity=activity;}
@@ -52,7 +52,7 @@ public final class QatfahWhatsappDirect {
     @Override public void onPageFinished(WebView view,String url){
       if(!url.startsWith("https://web.whatsapp.com/"))return;
       loaded=true;injected=false;
-      if(pending!=null)injectAndSend();
+      if(pending!=null){if(atRecipient)handler.postDelayed(()->injectAndSend(),1400);else navigate(pending.getString("phone",""),pending.getString("caption",""));}
     }
     @Override public boolean shouldOverrideUrlLoading(WebView view,WebResourceRequest request){
       Uri url=request.getUrl();return !("https".equals(url.getScheme())&&"web.whatsapp.com".equals(url.getHost()));
@@ -83,7 +83,7 @@ public final class QatfahWhatsappDirect {
    web.evaluateJavascript("window.__qatfahDirect.prepare("+options.toString()+")",ok->{
     if(pending==null)return;
     if(!"true".equals(ok)){fail("واتساب مشغول بمحاولة إرسال أخرى");return;}
-    if(base64.isEmpty()){navigate(phone,caption);return;}
+    if(base64.isEmpty()){beginSend();return;}
     // Chunked injection avoids very large evaluateJavascript arguments.
     int chunkSize=200000;sendChunk(base64,0,chunkSize,phone,caption);
    });
@@ -91,7 +91,7 @@ public final class QatfahWhatsappDirect {
  }
  private void sendChunk(String b64,int index,int size,String phone,String caption){
   if(pending==null||web==null)return;
-  if(index>=b64.length()){navigate(phone,caption);return;}
+  if(index>=b64.length()){beginSend();return;}
   String chunk=JSONObject.quote(b64.substring(index,Math.min(b64.length(),index+size)));
   web.evaluateJavascript("window.__qatfahDirect.addChunk("+chunk+")",v->{
    if(!"true".equals(v)){fail("فشل نقل مرفق PDF إلى واتساب");return;}
@@ -99,23 +99,17 @@ public final class QatfahWhatsappDirect {
   });
  }
  private void navigate(String phone,String caption){
-  if(pending==null)return;
-  // Navigate the already-authenticated embedded WebView to the recipient, then run the send driver.
+  if(pending==null||web==null)return;
+  atRecipient=true;loaded=false;
   String url="https://web.whatsapp.com/send?phone="+Uri.encode(phone);
-  // PDF caption is entered into the file preview by the driver, never into chat URL.
-  if(pending.getString("base64","").isEmpty())url+="&text="; // driver fills text after loading
   web.loadUrl(url);
-  loaded=false;
-  handler.postDelayed(()->{
-   if(pending==null)return;
-   web.evaluateJavascript(script,v->{
-    if(pending==null)return;
-    web.evaluateJavascript("window.__qatfahDirect.start()",started->{
-     if(!"true".equals(started)){fail("تعذر بدء الإرسال داخل واتساب");return;}
-     check();
-    });
-   });
-  },3800);
+ }
+ private void beginSend(){
+  if(pending==null||web==null)return;
+  web.evaluateJavascript("window.__qatfahDirect.start()",started->{
+   if(!"true".equals(started)){fail("تعذر بدء الإرسال داخل واتساب");return;}
+   check();
+  });
  }
  private void check(){
   if(pending==null||web==null)return;
@@ -142,9 +136,9 @@ public final class QatfahWhatsappDirect {
   activity.runOnUiThread(()->{
    if(pending!=null){call.reject("هناك محاولة إرسال قيد التنفيذ");return;}
    try{
-    pending=call;startedAt=System.currentTimeMillis();uploading=true;
+    pending=call;startedAt=System.currentTimeMillis();uploading=true;atRecipient=false;
     init();
-    if(loaded)injectAndSend();
+    if(loaded)navigate(call.getString("phone",""),call.getString("caption",""));
     else handler.postDelayed(()->{if(pending!=null&&!loaded)fail("واتساب ويب لم يحمل داخل التطبيق؛ افتح شاشة الربط أولًا");},20000);
    }catch(Exception e){fail("تعذر بدء واتساب المدمج: "+e.getMessage());}
   });
