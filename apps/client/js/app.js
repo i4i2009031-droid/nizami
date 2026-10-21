@@ -393,6 +393,5 @@ $('login-form').onsubmit=async ev=>{ev.preventDefault();const f=new FormData(ev.
  const session={token:null,mode:'github',user,lastChecked:Date.now()};persistSessionObject(session);await activate(session);
  }catch(e){toast(e.message)}finally{button.disabled=false;}};
 
-$('demo-button').onclick=async()=>{const demo={mode:'demo',token:null,user:{id:'demo',username:'demo',storeName:'محل قطفة',expiresAt:'2099-12-31'},lastChecked:Date.now()};persistSessionObject(demo);await activate(demo);};
 
 initial().catch(e=>{console.error(e);toast('تعذر فتح قاعدة البيانات المحلية: '+e.message);});
