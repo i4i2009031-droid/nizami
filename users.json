@@ -10,6 +10,15 @@
       "salt": "5f3349d35e8c6585563e069cb522efc7",
       "rounds": 240000,
       "passwordHash": "6d09ffdb5fe26c25335ee14c89ed7d01d5bd854dd452e5780363e665e0e69e87"
+    },
+    {
+      "id": "4543db8f-86fd-4ea7-a8ba-637f0a2e1f49",
+      "username": "Fa123",
+      "expiresAt": "2027-09-30",
+      "active": true,
+      "salt": "cb808a5fbc5d810372367f313b369ddc",
+      "rounds": 240000,
+      "passwordHash": "b45cb73ef9e448d85b25cf630dde55a734d190333b794ddd372aa6dd949323bd"
     }
   ]
 }
