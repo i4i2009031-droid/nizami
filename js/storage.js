@@ -1,3 +1,4 @@
+import {validateNewAccountingEvents} from './money-services.js';
 const DB_VERSION=2;let dbPromise=null;let activeTenant='demo';
 export function setTenant(id){activeTenant=String(id||'demo').replace(/[^\w-]/g,'');dbPromise=null;}
 const open=()=>{
@@ -10,7 +11,7 @@ const open=()=>{
 };
 async function operate(store,mode,cb){const db=await open();return new Promise((resolve,reject)=>{const tx=db.transaction(store,mode);const obj=tx.objectStore(store);let value,reason;const abort=error=>{reason=error;try{tx.abort();}catch{}reject(error);};tx.oncomplete=()=>resolve(value?.result);tx.onerror=()=>reject(reason||tx.error);tx.onabort=()=>reject(reason||tx.error||new Error('لم يتم حفظ العملية؛ أُلغيت معاملة التخزين'));try{value=cb(obj,abort);}catch(err){abort(err);}});}
 export async function allEvents(){const db=await open();return new Promise((ok,bad)=>{const r=db.transaction('events','readonly').objectStore('events').getAll();r.onsuccess=()=>ok(r.result.sort((a,b)=>(a.at||'').localeCompare(b.at||'')||a.id.localeCompare(b.id)));r.onerror=()=>bad(r.error);});}
-export const putEvent=async event=>operate('events','readwrite',s=>s.put(event));
+export const putEvent=async event=>commitEvents([event]);
 /** Save the replacement invoice, reversal and new catalogue items together.
  * A duplicate event id or storage failure rolls back the entire business action.
  */
@@ -21,15 +22,14 @@ export async function commitEvents(events){
   if(!e||typeof e.id!=='string'||!e.id||ids.has(e.id))throw new Error('معرّف عملية مفقود أو مكرر');
   ids.add(e.id);
  }
- const replacesInvoice=events.some(e=>e.type==='invoice.create'&&e.payload?.replaces!==undefined&&e.payload?.replaces!==null&&e.payload.replaces!=='');
  return operate('events','readwrite',(store,abort)=>{
-  if(!replacesInvoice){for(const e of events)store.add(e);return;}
-  // A second tab may still be editing the old invoice. Validate against the
-  // latest committed lineage under the same write transaction, before any add.
+  // Check references and invoice correction lineage against the latest committed
+  // log inside this write transaction. One transfer is one immutable event, and
+  // neither another tab nor a restore can insert only one side of that transfer.
   const request=store.getAll();
   request.onsuccess=()=>{
    try{
-    if(request.result.some(e=>ids.has(e.id)))throw new Error('معرّف عملية موجود مسبقًا؛ لم يتم حفظ تعديل الفاتورة');
+    if(request.result.some(e=>ids.has(e.id)))throw new Error('معرّف عملية موجود مسبقًا؛ لم يتم حفظ العملية');
     prepareEventImport(request.result,events);
     for(const event of events)store.add(event);
    }catch(error){abort(error);}
@@ -67,6 +67,7 @@ export function prepareEventImport(existing,events){
   if(replacements.has(target)&&replacements.get(target)!==event.id)throw new Error('تعارض بين تعديلين مختلفين لنفس الفاتورة؛ لم تُستعد أي عملية من النسخة. يجب تحديد التعديل الصحيح قبل الدمج');
   replacements.set(target,event.id);
  }
+ validateNewAccountingEvents([...byId.values()]);
  return additions;
 }
 export async function importEvents(events){

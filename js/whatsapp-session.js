@@ -102,8 +102,8 @@ export function normalizeYemenPhone(rawPhone){
  return '967'+digits;
 }
 
-// A failed bridge call may have happened after dispatch. Only an explicit,
-// pre-dispatch safe result permits opening the direct recipient fallback.
+// Sending is strictly silent. No result, including pre-dispatch failure, may
+// launch another app, share sheet, pairing panel, or PDF preview.
 export function createWhatsappSender({getPlugin,isOnline=()=>true,onProgress=()=>{},schedule=setInterval,cancel=clearInterval,interval=850,makeRequestId=()=>globalThis.crypto.randomUUID()}){
  let busy=false;
  return async payload=>{
@@ -117,7 +117,7 @@ export function createWhatsappSender({getPlugin,isOnline=()=>true,onProgress=()=
   // Rendering and status reads must never change the outcome of a real send.
   const report=value=>{try{onProgress(value);}catch{}};
   try{
-   const requestId=makeRequestId(),request={...payload,requestId};
+   const requestId=makeRequestId(),request={...payload,phone:normalizeYemenPhone(payload?.phone),requestId};
    report({requestId,phase:'preparing',finished:false});
    if(typeof plugin.whatsappSendStatus==='function')timer=schedule(async()=>{
     if(!tracking||reading)return;
@@ -128,24 +128,14 @@ export function createWhatsappSender({getPlugin,isOnline=()=>true,onProgress=()=
     }catch{}finally{reading=false;}
    },interval);
    const result=await plugin.sendWhatsAppInApp(request);
-   // Invalidate in-flight status reads before fallback: their last driver stage
-   // must not overwrite the separate "opening WhatsApp" state.
    stopTracking();
-   if(result?.safeToFallback===true&&result.dispatched===false&&result.submitted!==true&&plugin.sendWhatsAppIntent){
-    report({requestId,phase:'fallback_opening',finished:false});
-    try{
-     const fallback=await plugin.sendWhatsAppIntent(request);
-     if(fallback?.openedInWhatsApp===true||fallback?.status==='fallback_opened')return fallback;
-     const error=Error(fallback?.message||'لم تصل نتيجة فتح واتساب بالمستند');
-     error.code=fallback?.code;error.data=fallback;throw error;
-    }catch(fallbackError){
-     const error=Error(`تعذر الإرسال داخل واتساب: ${whatsappSendMessage(result)}\nالفتح البديل: ${fallbackError?.message||'تعذر فتح واتساب بالمستند'}`);
-     error.code='wa_fallback_failed';error.requestId=requestId;
-     error.primaryResult=result;error.fallbackError=fallbackError;error.cause=fallbackError;
-     throw error;
-    }
-   }
    if(!result)throw Error('لم تصل نتيجة الإرسال. راجع المحادثة قبل إعادة المحاولة');
+   if(result.requestId!==requestId){
+    const error=Error('تعذر مطابقة نتيجة واتساب مع محاولة الإرسال؛ راجع المحادثة قبل إعادة المحاولة');
+    error.code='wa_request_mismatch';error.requestId=requestId;
+    error.primaryResult={status:'uncertain',dispatched:null,code:error.code,failedStage:'verifying'};
+    throw error;
+   }
    return result;
   }finally{stopTracking();busy=false;}
  };
@@ -153,14 +143,8 @@ export function createWhatsappSender({getPlugin,isOnline=()=>true,onProgress=()=
 
 const SEND_STAGES={
  preparing:'تجهيز الإرسال',starting:'بدء الإرسال',uploading:'نقل ملف PDF',
- open_chat:'فتح محادثة المستلم',opening_chat:'فتح محادثة المستلم',await_search:'فتح البحث عن المستلم',
- await_result:'مطابقة رقم المستلم',await_chat:'فتح محادثة المستلم',
- await_contact_info:'التحقق من رقم جهة الاتصال',await_contact_close:'العودة إلى محادثة المستلم',
- await_attachment:'إرفاق ملف PDF',attaching:'إرفاق ملف PDF',
- await_preview:'تجهيز معاينة المستند',waiting_preview:'تجهيز معاينة المستند',
- await_text:'تجهيز الرسالة',submitting:'تقديم المستند إلى واتساب',
- verifying:'التحقق من قبول واتساب للإرسال',fallback_preparing:'تجهيز الفتح البديل',
- fallback_attachment_write:'تجهيز ملف المشاركة',fallback_provider:'إنشاء رابط للمرفق',fallback_opening:'فتح واتساب بالمرفق'
+ waiting_engine:'تجهيز محرك واتساب في الخلفية',verifying_recipient:'مطابقة رقم العميل',
+ submitting:'إرسال المستند في الخلفية',verifying:'التحقق من قبول واتساب للإرسال'
 };
 
 export function whatsappSendProgressMessage(value){
@@ -178,17 +162,14 @@ export function whatsappSendDetails(value){
  if(code)parts.push('الرمز: '+code);
  const version=primary?.driverVersion??primary?.data?.driverVersion;
  if(Number.isInteger(version)&&version>0)parts.push('المحرك: '+version);
- const fallback=value?.fallbackError,fallbackCode=identifier(fallback?.code||fallback?.data?.code);
- const fallbackStage=identifier(fallback?.failedStage||fallback?.data?.failedStage);
- if(fallbackStage)parts.push('مرحلة الفتح البديل: '+(SEND_STAGES[fallbackStage]||fallbackStage));
- if(fallbackCode)parts.push('رمز الفتح البديل: '+fallbackCode);
  return parts.join(' • ');
 }
 
 export function whatsappSendMessage(result){
- if(result?.openedInWhatsApp===true||result?.status==='fallback_opened')return 'فتحنا المحادثة بالمرفق؛ أكمل الإرسال في واتساب';
- if(result?.submitted===true||result?.status==='submitted'||result?.outcome==='submitted')return 'تم تقديم المستند إلى واتساب للإرسال';
- if(result?.dispatched===true||result?.status==='uncertain'||result?.outcome==='uncertain'){
+ if(result?.submitted===true&&Number.isInteger(result.ack)&&result.ack>=1&&typeof result.messageId==='string'&&result.messageId){
+  return result.ack>=2?'تم تسليم المستند للعميل':'تم إرسال المستند؛ أكّد خادم واتساب قبوله';
+ }
+ if(result?.dispatched===true||result?.status==='uncertain'||result?.outcome==='uncertain'||result?.submitted===true){
   const message=result.message||'لم يتأكد الإرسال';
   return message.includes('راجع المحادثة')?message:message+'؛ راجع المحادثة قبل إعادة المحاولة';
  }
