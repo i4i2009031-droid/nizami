@@ -8,7 +8,10 @@
   let current = null, libraryInFlight = false;
   // Timed-out WA-JS promises cannot safely be aborted. Keep this guard until
   // settlement, even after caller/native locks release, to prevent duplicates.
-  const receipts = new Map();
+  // Remember every invocation, including rejected/uncertain attempts. A timeout
+  // can finish before WA-JS later accepts the message; replaying that request ID
+  // must never enqueue the same document again in this engine's lifetime.
+  const dispatchedRequests = new Set();
   const token = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(value);
   const wid = value => typeof value === 'string' ? value : value?.toString?.() || '';
   const error = (code, message) => Object.assign(new Error(message), {code});
@@ -27,10 +30,6 @@
     op.phase=name; op.code=code; op.message=message; op.finished=true; op.chunks.length=0;
     if (op.deadline !== null) clearTimeout(op.deadline);
     op.deadline=null;
-    if (name === 'submitted') {
-      receipts.set(op.requestId,snapshot(op));
-      if (receipts.size > 32) receipts.delete(receipts.keys().next().value);
-    }
   }
   const alive = op => current === op && !op.finished;
   const pause = ms => new Promise(resolve => setTimeout(resolve,ms));
@@ -80,9 +79,16 @@
       throw error('ack_recipient_mismatch','تعذر مطابقة تأكيد واتساب مع رقم العميل؛ راجع المحادثة قبل إعادة المحاولة');
     }
     op.messageId=result.id;
-    const ack=Number(result.ack);
+    const ack=result.ack;
     if (!Number.isInteger(ack) || ack < 1 || ack > 4) {
       throw error('ack_not_confirmed','لم يؤكد واتساب قبول الرسالة بعد؛ راجع المحادثة قبل إعادة المحاولة');
+    }
+    // WA-JS 4.7.1 returns a resolved SendMsgResultObject. Explicit failure
+    // must not be hidden by a contradictory positive acknowledgement value.
+    const sendStatus=result.sendMsgResult;
+    const sendResult=sendStatus && typeof sendStatus === 'object' ? sendStatus.messageSendResult : sendStatus;
+    if (sendStatus != null && sendResult !== 'OK') {
+      throw error('ack_result_conflict','لم تتطابق نتيجة واتساب مع تأكيد الإرسال؛ راجع المحادثة قبل إعادة المحاولة');
     }
     op.ack=ack; op.submitted=true;
     finish(op,'submitted','',ack >= 2 ? 'تم تسليم المستند للعميل' : 'تم إرسال المستند؛ أكّد خادم واتساب قبوله');
@@ -106,7 +112,7 @@
       const options={waitForAck:true,markIsRead:false,detectMentioned:false};
       // Even a rejected WA-JS Promise may have queued a message. No automatic
       // retry, paste, click or native application fallback is safe here.
-      op.dispatched=true; libraryInFlight=true;
+      op.dispatched=true; libraryInFlight=true; dispatchedRequests.add(op.requestId);
       let result;
       try {
         result=op.isPdf
@@ -130,7 +136,7 @@
     prepare(options={}) {
       if ((current && !current.finished) || libraryInFlight) return false;
       if (!token(options.requestId) || !/^9677[0-9]{8}$/.test(options.phone || '')) return false;
-      if (receipts.has(options.requestId)) return false;
+      if (dispatchedRequests.has(options.requestId)) return false;
       const caption=String(options.caption || ''),filename=String(options.filename || 'Qatfah.pdf');
       if (caption.length > 3000 || filename.length > 120 || /[\\/\x00-\x1f]/.test(filename) ||
           (options.isPdf && !/\.pdf$/i.test(filename)) || (!options.isPdf && !caption.trim())) return false;

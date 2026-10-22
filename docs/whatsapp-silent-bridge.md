@@ -47,6 +47,11 @@ An exception after the library call, missing acknowledgement, or timeout is
 There is no automatic fallback or resend. The button/native locks release in
 `finally`; an unresolved WPP network Promise retains its own dispatch guard so a
 second attempt cannot duplicate an upload still running in the background.
+Every request ID that reached WPP remains reserved for the engine lifetime,
+including an uncertain or rejected attempt. An eviction from the detailed result
+cache cannot make an old request dispatch again. Acknowledgements must be actual
+integers, and an explicit upload/network error cannot be converted to success by
+a contradictory positive acknowledgement.
 
 ## Verification and its limits
 

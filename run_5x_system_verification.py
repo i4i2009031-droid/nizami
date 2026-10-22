@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -56,6 +57,60 @@ def execute(label: str, command: list[str], output: Path, env: dict[str, str]) -
         code = process.wait()
     return {"status": "PASS" if code == 0 else "FAIL", "exitCode": code,
             "log": str(log), "command": command}
+
+
+def execute_unit_tests(node: str, output: Path, env: dict[str, str]) -> dict:
+    """Retain process isolation while requiring actual node:test case evidence.
+
+    Some sandbox Node builds turn `node --test file` into an opaque file-level
+    wrapper result. Running each node:test module directly produces its complete
+    TAP case stream, including failed and skipped tests. A zero-exit wrapper with
+    no real cases is deliberately not acceptable evidence.
+    """
+    print(f"[{now()}] Unit and integration tests (individual TAP processes)", flush=True)
+    log = output / "unit-and-integration-tests.log"
+    files = sorted((ROOT / "tests").glob("*.test.mjs"))
+    checks = []
+    with log.open("w", encoding="utf-8") as stream:
+        for path in files:
+            command = [node, "--test-reporter=tap", str(path)]
+            try:
+                process = subprocess.run(command, cwd=ROOT, env=env, text=True,
+                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                         timeout=120)
+                returncode, captured = process.returncode, process.stdout
+            except subprocess.TimeoutExpired as error:
+                returncode = 124
+                captured = error.stdout or ""
+                if isinstance(captured, bytes):
+                    captured = captured.decode("utf-8", errors="replace")
+                captured += "\n# Verification runner: test file timed out after 120 seconds\n"
+            stream.write(f"\n# Test file: {path.relative_to(ROOT)}\n")
+            stream.write(captured)
+            stream.flush()
+            counts = {key: int(value) for key, value in re.findall(
+                r"^# (tests|pass|fail|cancelled|skipped|todo) (\d+)\s*$",
+                captured, flags=re.MULTILINE)}
+            # The TAP source must contain named subtests as well as final counts;
+            # do not accept an exit code or a suite file name as the whole proof.
+            named_cases = re.findall(r"^# Subtest: (.+)$", captured, flags=re.MULTILINE)
+            wrapper_names = {str(path), str(path.relative_to(ROOT)), path.name}
+            actual_cases = [name for name in named_cases if name not in wrapper_names]
+            passed = (returncode == 0 and counts.get("tests", 0) > 0
+                      and counts.get("pass") == counts.get("tests")
+                      and all(counts.get(key) == 0 for key in ["fail", "cancelled", "skipped", "todo"])
+                      and len(actual_cases) >= counts["tests"])
+            check = {"file": str(path.relative_to(ROOT)), "command": command,
+                     "status": "PASS" if passed else "FAIL", "exitCode": returncode,
+                     "counts": counts, "namedCases": actual_cases}
+            checks.append(check)
+            print(f"{check['status']}: {check['file']} — {counts.get('pass', 0)}/{counts.get('tests', 0)} actual cases", flush=True)
+    passed = bool(checks) and all(check["status"] == "PASS" for check in checks)
+    return {"status": "PASS" if passed else "FAIL", "exitCode": 0 if passed else 1,
+            "log": str(log), "testFiles": len(checks),
+            "tests": sum(check["counts"].get("tests", 0) for check in checks),
+            "passed": sum(check["counts"].get("pass", 0) for check in checks),
+            "files": checks}
 
 
 def fixture_logos(output: Path, cycles: int) -> None:
@@ -104,6 +159,8 @@ def inspect_pdfs(browser: dict, output: Path) -> list[dict]:
             if not renderer:
                 raise RuntimeError("pdftoppm is required for real PDF rendering")
             prefix = rendered / path.stem
+            for previous in rendered.glob(path.stem + "-*.png"):
+                previous.unlink()
             render = subprocess.run([renderer, "-r", "85", "-png", str(path), str(prefix)],
                                     capture_output=True, text=True, timeout=60)
             if render.returncode:
@@ -151,6 +208,7 @@ def markdown_report(report: dict) -> str:
         lines.append("| " + " | ".join([title, *values]) + " |")
     lines.extend(["", "## الأدلة", "",
                   f"- الاختبارات الآلية الكاملة المطلوبة: {'نجحت' if report['requiredAutomationPassed'] else 'لم تنجح كاملة'}.",
+                  f"- حالات الاختبار الفردية المثبتة من سجلات TAP: {report['commands']['unit'].get('passed', 0)}/{report['commands']['unit'].get('tests', 0)} عبر {report['commands']['unit'].get('testFiles', 0)} ملفاً.",
                   f"- ملفات PDF التي فُحصت ورُسمت فعلياً: {sum(p['status']=='PASS' for p in report['pdfChecks'])}/{len(report['pdfChecks'])}.",
                   f"- تطابق ملفات المصدر قبل الفحص وبعده: {report['sourceUnchangedDuringRun']}.",
                   "- إقرار واتساب في هذا الاختبار مصطنع عند حدود الجسر فقط؛ لم يجر اختبار إرسال حي.",
@@ -169,6 +227,9 @@ def main() -> int:
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    # A failed Chromium launch must not accidentally reuse a previous run's green
+    # section table. All document hashes will come only from this run's report.
+    (output / "browser-results.json").unlink(missing_ok=True)
     env = dict(os.environ)
     env["QATFAH_VERIFICATION_OUTPUT"] = str(output)
     env["QATFAH_VERIFICATION_CYCLES"] = str(args.cycles)
@@ -190,12 +251,16 @@ def main() -> int:
     if args.skip_unit:
         report["commands"]["unit"] = {"status": "NOT_RUN", "reason": "Diagnostic --skip-unit"}
     else:
-        tests = [str(p) for p in sorted((ROOT / "tests").glob("*.test.mjs"))]
-        report["commands"]["unit"] = execute("Unit and integration tests", [node, "--test", *tests], output, env)
+        report["commands"]["unit"] = execute_unit_tests(node, output, env)
     report["commands"]["build"] = execute("Build tested web sources", [node, "scripts/build-web.mjs"], output, env)
     report["commands"]["browser"] = execute("Chromium accounting cycles", [node, "scripts/system-verification.mjs"], output, env)
     browser_path = output / "browser-results.json"
-    report["browser"] = json.loads(browser_path.read_text()) if browser_path.exists() else {"cycles": [], "errors": ["Browser report is missing"]}
+    try:
+        report["browser"] = json.loads(browser_path.read_text())
+        if not isinstance(report["browser"], dict):
+            raise ValueError("Browser report must be a JSON object")
+    except (OSError, ValueError) as error:
+        report["browser"] = {"cycles": [], "errors": ["Browser report is missing or invalid: " + str(error)]}
     print("Inspecting and rendering every generated PDF page", flush=True)
     report["pdfChecks"] = inspect_pdfs(report["browser"], output)
     # Do not leave a green section in the human-readable table if the independent

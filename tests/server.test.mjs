@@ -81,3 +81,35 @@ test('API journals and cash movements retain atomic references, precision and is
  assert.equal((await api('/api/sync/push',{token,method:'POST',body:{events:[receipt]}})).status,200);
  assert.equal((await api('/api/sync/pull?after=0',{token})).events.length,events.length);
 });
+
+test('API honors per-line invoice rounding while preserving unflagged historical totals',async()=>{
+ const admin=await login('admin','test-secure-admin-pass-1234');
+ const created=await api('/api/admin/users',{token:admin.token,method:'POST',body:{username:'merchant_invoice_math',password:'SecurePassInvoice300',storeName:'اختبار دقة الفواتير',expiresAt:'2028-01-01'}});
+ assert.equal(created.status,201);
+ const {token}=await login('merchant_invoice_math','SecurePassInvoice300');
+ const invoice=(items,total,extra={})=>({id:randomUUID(),type:'invoice.create',at:'2026-10-22T12:00:00Z',payload:{kind:'sale',currency:'USD',payment:'cash',paid:total,total,items,...extra}});
+ const halves=[{title:'نصف الوحدة الأولى',qty:0.5,price:0.01},{title:'نصف الوحدة الثانية',qty:0.5,price:0.01}];
+ const decimalTie=[{title:'كمية كسرية',qty:1.005,price:1}];
+ const accepted=[
+  invoice(halves,0.02,{roundingMode:'per_line'}),
+  invoice(halves,0.01),
+  invoice(decimalTie,1.01,{roundingMode:'per_line'}),
+  invoice(decimalTie,1)
+ ];
+ assert.equal((await api('/api/sync/push',{token,method:'POST',body:{events:accepted}})).status,200);
+ const loaded=(await api('/api/sync/pull?after=0',{token})).events;
+ assert.equal(loaded.length,4);assert.equal(cashbook(loaded,'USD').closing,2.04);
+ for(const invalid of [
+  invoice(halves,0.01,{roundingMode:'per_line'}),
+  invoice(halves,0.02),
+  invoice(decimalTie,1,{roundingMode:'per_line'}),
+  invoice([{title:'صنف',qty:1,price:1}],1,{roundingMode:'unknown'}),
+  invoice([{title:'صنف',qty:1,price:1}],1,{roundingMode:null}),
+  invoice([{title:'صنف',qty:true,price:1}],1,{roundingMode:'per_line'}),
+  invoice([null],1,{roundingMode:'per_line'})
+ ]){
+  const response=await api('/api/sync/push',{token,method:'POST',body:{events:[invalid]}});
+  assert.equal(response.status,422,JSON.stringify(response));
+ }
+ assert.equal((await api('/api/sync/pull?after=0',{token})).events.length,4,'invalid invoice batches must not alter the log');
+});

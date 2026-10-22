@@ -2,7 +2,7 @@
  * This is fresh bookkeeping code informed by the supplied app's feature categories,
  * not a copy of compiled Flutter application code. */
 import {CURRENCIES, money, dateOnly, activeRecords, parties} from './ledger.js';
-import {validateExchange,validateRemittance,validateAccountTransfer,validateSettlement,unsettledRemittances,journalAudit,accountBalances,financialPostings,fromMinor} from './money-services.js';
+import {validateExchange,validateRemittance,validateAccountTransfer,validateSettlement,unsettledRemittances,journalAudit,accountBalances,financialPostings,fromMinor,toMinor} from './money-services.js';
 
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const $=id=>document.getElementById(id);
@@ -12,7 +12,20 @@ const getForm=(id)=>Object.fromEntries(new FormData($(id)));
 
 /** Pass only existing Qatfah interface adapters, never create a competing store. */
 export function createMoneyDesk({events,record,showSheet,closeSheet,toast,store,makePdf,sharePdf}){
-  const move=async(kind,payload)=>{await record(kind,payload);desk();toast('تم تسجيل العملية وربطها بالصندوق والتقارير');};
+  let savingMovement=false;
+  const move=async(kind,payload)=>{
+    if(savingMovement)return false;
+    savingMovement=true;
+    const buttons=[...document.querySelectorAll('#sheet-body form button[type="submit"], #sheet-body form button:not([type])')].map(button=>({button,disabled:button.disabled}));
+    try{
+      for(const {button} of buttons)button.disabled=true;
+      await record(kind,payload);desk();toast('تم تسجيل العملية وربطها بالصندوق والتقارير');
+      return true;
+    }finally{
+      savingMovement=false;
+      for(const {button,disabled} of buttons)if(button.isConnected)button.disabled=disabled;
+    }
+  };
   function desk(){
     const balances=accountBalances(events()),pending=unsettledRemittances(events());
     const rows=Object.entries(balances).map(([c,b])=>`<div class="fx-balance-row"><div><b>${c}</b><small>${esc(CURRENCIES[c].label)}</small></div><div><small>الصندوق</small><b>${money(b.cash,c)}</b></div><div><small>البنك</small><b>${money(b.bank,c)}</b></div><div><small>حوالات معلقة</small><b>${money(b.remittanceDue,c)}</b></div></div>`).join('');
@@ -52,7 +65,7 @@ export function createMoneyDesk({events,record,showSheet,closeSheet,toast,store,
   function settleForm(){
     const list=unsettledRemittances(events());
     showSheet('صرف الحوالات',`<p class="hint">اختَر الحوالة من السجل وتأكد من استلام المستفيد قبل تسجيل الصرف؛ لا يمكن صرفها مرتين.</p>${list.length?`<form id="rem-settle-form" class="sheet-form"><label>الحوالة المعلقة<select name="reference">${list.map(x=>`<option value="${esc(x.payload.reference)}">${esc(x.payload.reference)} — ${esc(x.payload.beneficiary)} — ${money(x.payload.amount,x.payload.currency)}</option>`).join('')}</select></label><button class="btn btn-primary" type="submit">تأكيد تسوية الحوالة</button></form>`:'<p class="hint">لا توجد حوالات معلقة</p>'}`);
-    if($('rem-settle-form'))$('rem-settle-form').onsubmit=async ev=>{ev.preventDefault();try{const x=getForm('rem-settle-form'),issued=validateSettlement(events(),x.reference);if(!confirm(`تأكيد صرف ${money(issued.payload.amount,issued.payload.currency)} للمستفيد ${issued.payload.beneficiary}؟`))return;ev.submitter.disabled=true;await move('remittance.settle',{issuedId:issued.id,reference:x.reference,currency:issued.payload.currency,amount:issued.payload.amount});}catch(err){toast(err.message)}};
+    if($('rem-settle-form'))$('rem-settle-form').onsubmit=async ev=>{ev.preventDefault();try{const x=getForm('rem-settle-form'),issued=validateSettlement(events(),x.reference);if(!confirm(`تأكيد صرف ${money(issued.payload.amount,issued.payload.currency)} للمستفيد ${issued.payload.beneficiary}؟`))return;await move('remittance.settle',{issuedId:issued.id,reference:x.reference,currency:issued.payload.currency,amount:issued.payload.amount});}catch(err){toast(err.message)}};
   }
   function transferForm(){showSheet('تحويل النقدية بين الصندوق والبنك',`<div class="hint">ينقل المبلغ بين حسابي النقدية والبنك بنفس العملة، ولا يُنشئ دخلًا أو مصروفًا جديدًا.</div>
       <form id="fund-form" class="sheet-form"><label>العملة<select name="currency">${choices()}</select></label><div class="grid-two"><label>من<select name="from"><option value="cash">الصندوق</option><option value="bank">البنك</option></select></label><label>إلى<select name="to"><option value="bank">البنك</option><option value="cash">الصندوق</option></select></label></div>
@@ -60,7 +73,7 @@ export function createMoneyDesk({events,record,showSheet,closeSheet,toast,store,
       $('fund-form').onsubmit=async e=>{e.preventDefault();try{await move('fund.transfer',validateAccountTransfer(getForm('fund-form')));}catch(x){toast(x.message)}};
   }
   function openingForm(){showSheet('رصيد افتتاحي للصندوق',`<div class="hint">لإدخال رصيد المحل النقدي قبل بدء تسجيل العمليات. لا تضف الرصيد نفسه مرتين.</div><form id="cash-open-form" class="sheet-form"><label>العملة<select name="currency">${choices()}</select></label><label>الحساب<select name="account"><option value="cash">الصندوق</option><option value="bank">البنك</option></select></label><label>المبلغ<input name="amount" type="number" required min="0.01" step="0.01"/></label><button class="btn btn-primary">تسجيل الرصيد</button></form>`);
-    $('cash-open-form').onsubmit=async e=>{e.preventDefault();const x=getForm('cash-open-form');try{const amount=Number(x.amount);if(!Number.isFinite(amount)||amount<=0||amount>1e12)throw Error('أدخل مبلغًا صحيحًا');await move('cash.open',{...x,amount});}catch(err){toast(err.message)}};
+    $('cash-open-form').onsubmit=async e=>{e.preventDefault();const x=getForm('cash-open-form');try{const amount=fromMinor(toMinor(x.amount,x.currency),x.currency);if(amount<=0)throw Error('أدخل مبلغًا صحيحًا');await move('cash.open',{...x,amount});}catch(err){toast(err.message)}};
   }
   function journalForm(){const audit=journalAudit(events()),postings=audit.postings.slice().reverse();showSheet('سجل القيود المزدوجة',`<p class="hint">${audit.balanced?'✓ جميع القيود المالية متوازنة داخل كل عملة':'تنبيه: توجد قيود غير متوازنة؛ راجع البيانات.'} • القيد يعرض المدين والدائن لكل عملية بعملة مستقلة. لا يمثل احتسابًا كاملًا للأرباح أو فروق أسعار الصرف.</p>
     <div class="table-scroll"><table class="report-table"><thead><tr><th>التاريخ</th><th>العملة</th><th>الحساب</th><th>مدين</th><th>دائن</th></tr></thead><tbody>${postings.slice(0,65).map(x=>`<tr><td>${dateOnly(x.at)}</td><td>${x.currency}</td><td>${esc(x.account)}</td><td>${x.side==='debit'?money(fromMinor(x.units,x.currency),x.currency):'—'}</td><td>${x.side==='credit'?money(fromMinor(x.units,x.currency),x.currency):'—'}</td></tr>`).join('')||'<tr><td colspan="5">لا توجد قيود</td></tr>'}</tbody></table></div><div class="foot-actions"><button id="journal-pdf" class="btn btn-primary">إنشاء PDF لكامل القيود</button><button id="journal-back" class="btn btn-light">رجوع</button></div>`);

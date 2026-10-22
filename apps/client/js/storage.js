@@ -1,4 +1,5 @@
-import {validateNewAccountingEvents} from './money-services.js';
+import {validateNewAccountingEvents,financialPostings} from './money-services.js';
+import {chronologicalOrder} from './accounting-primitives.js';
 const DB_VERSION=2;let dbPromise=null;let activeTenant='demo';
 export function setTenant(id){activeTenant=String(id||'demo').replace(/[^\w-]/g,'');dbPromise=null;}
 const open=()=>{
@@ -10,7 +11,7 @@ const open=()=>{
  });return dbPromise;
 };
 async function operate(store,mode,cb){const db=await open();return new Promise((resolve,reject)=>{const tx=db.transaction(store,mode);const obj=tx.objectStore(store);let value,reason;const abort=error=>{reason=error;try{tx.abort();}catch{}reject(error);};tx.oncomplete=()=>resolve(value?.result);tx.onerror=()=>reject(reason||tx.error);tx.onabort=()=>reject(reason||tx.error||new Error('لم يتم حفظ العملية؛ أُلغيت معاملة التخزين'));try{value=cb(obj,abort);}catch(err){abort(err);}});}
-export async function allEvents(){const db=await open();return new Promise((ok,bad)=>{const r=db.transaction('events','readonly').objectStore('events').getAll();r.onsuccess=()=>ok(r.result.sort((a,b)=>(a.at||'').localeCompare(b.at||'')||a.id.localeCompare(b.id)));r.onerror=()=>bad(r.error);});}
+export async function allEvents(){const db=await open();return new Promise((ok,bad)=>{const r=db.transaction('events','readonly').objectStore('events').getAll();r.onsuccess=()=>ok(r.result.sort(chronologicalOrder));r.onerror=()=>bad(r.error);});}
 export const putEvent=async event=>commitEvents([event]);
 /** Save the replacement invoice, reversal and new catalogue items together.
  * A duplicate event id or storage failure rolls back the entire business action.
@@ -58,16 +59,39 @@ export function prepareEventImport(existing,events){
    byId.set(event.id,event);additions.push({...event,synced:true});
   }
  }
- const replacements=new Map();
+ const replacements=new Map(),reversed=new Set();
+ for(const event of byId.values()){
+  if(event.type!=='event.reverse')continue;
+  const reference=event.payload?.ref,target=byId.get(reference);
+  if(typeof reference!=='string'||!target||target.id===event.id||target.type==='event.reverse')throw new Error('مرجع إلغاء غير صالح؛ يجب إلغاء عملية أصلية محفوظة');
+  reversed.add(reference);
+ }
  for(const event of byId.values()){
   if(event.type!=='invoice.create')continue;
   const target=event.payload?.replaces;
   if(target===undefined||target===null||target==='')continue;
   if(typeof target!=='string')throw new Error('مرجع تعديل فاتورة غير صالح؛ لم تُستعد أي عملية من النسخة');
+  if(target===event.id||byId.get(target)?.type!=='invoice.create'||!reversed.has(target))throw new Error('تصحيح فاتورة غير مكتمل؛ يجب حفظ الأصل وإلغائه مع الفاتورة البديلة');
   if(replacements.has(target)&&replacements.get(target)!==event.id)throw new Error('تعارض بين تعديلين مختلفين لنفس الفاتورة؛ لم تُستعد أي عملية من النسخة. يجب تحديد التعديل الصحيح قبل الدمج');
   replacements.set(target,event.id);
  }
- validateNewAccountingEvents([...byId.values()]);
+ // A closed replacement loop has no original invoice. Do not let a malformed
+ // restored log silently cancel every document while retaining a correction.
+ const visited=new Set();
+ for(const start of replacements.keys()){
+  if(visited.has(start))continue;
+  const chain=new Set();let current=start;
+  while(replacements.has(current)&&!visited.has(current)){
+   if(chain.has(current))throw new Error('سلسلة تصحيح الفواتير تحتوي مرجعاً دائرياً');
+   chain.add(current);current=replacements.get(current);
+  }
+  for(const id of chain)visited.add(id);
+ }
+ const combined=[...byId.values()];
+ validateNewAccountingEvents(combined);
+ // The same posting validation used by reporting must pass before committing
+ // offline, including duplicate settlements and reversed remittance origins.
+ financialPostings(combined);
  return additions;
 }
 export async function importEvents(events){

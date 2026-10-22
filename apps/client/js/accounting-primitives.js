@@ -46,4 +46,12 @@ export function rounded(value,currency='YER'){
 /** Business dates are Yemen local calendar dates, including near UTC midnight. */
 const arabiaDate=new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Aden',year:'numeric',month:'2-digit',day:'2-digit'});
 export const dateOnly=dt=>{const str=String(dt||'');if(!str.includes('T'))return str.slice(0,10);const d=new Date(str);if(Number.isNaN(d.getTime()))return str.slice(0,10);const parts=Object.fromEntries(arabiaDate.formatToParts(d).map(x=>[x.type,x.value]));return `${parts.year}-${parts.month}-${parts.day}`;};
+/** ISO strings with different offsets are not lexically chronological. Keep the
+ * actual instant (and a deterministic identity tie-breaker) across imports and
+ * running balances. The text fallback preserves readability of legacy rows. */
+export function chronologicalOrder(a,b){
+ const left=Date.parse(a.at),right=Date.parse(b.at);
+ const difference=Number.isFinite(left)&&Number.isFinite(right)?left-right:String(a.at||'').localeCompare(String(b.at||''));
+ return difference||String(a.id||'').localeCompare(String(b.id||''));
+}
 export function activeRecords(events){const canceled=new Set(events.filter(e=>e.type==='event.reverse').map(e=>e.payload.ref));return events.filter(e=>e.type!=='event.reverse'&&!canceled.has(e.id));}

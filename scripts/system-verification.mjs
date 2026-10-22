@@ -10,6 +10,9 @@ import {createHash} from 'node:crypto';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const output=resolve(process.env.QATFAH_VERIFICATION_OUTPUT||resolve(root,'verification-output'));
 const cycles=Number(process.env.QATFAH_VERIFICATION_CYCLES||5);
+const journalsPerKindPerCurrencyPerCycle=5;
+const catalogItemsPerCycle=5;
+const customersPerCycle=5;
 const required=['identity','catalog','cash_sales','credit_sales','purchases_vouchers','journals','cash_reports','whatsapp_contract','persistence'];
 const requiredPdfKinds=['invoice','voucher','simple-journal','transfer-source','transfer-destination','statement','cashbook','daily-sales','yearly-report'];
 const results={schema:1,startedAt:new Date().toISOString(),fixtureData:'Synthetic representative Yemeni merchant data; no real messages sent.',transport:'SIMULATED_ANDROID_BOUNDARY',liveWhatsapp:{status:'NOT_RUN',reason:'No authenticated Android WhatsApp session is attached to this runner.'},cycles:[],documents:[],errors:[]};
@@ -92,10 +95,10 @@ async function closeSheets(page){for(let i=0;i<4&&await page.locator('#sheet-bac
 async function home(page){await closeSheets(page);await page.locator('[data-nav="home"]').click();}
 async function action(page,id){await home(page);await page.locator(`#home-page [data-action="${id}"]`).click();}
 async function invoices(page){await closeSheets(page);await page.locator('[data-nav="invoices"]').click();}
-async function snapshot(page,ids){return page.evaluate(async({customer,supplier})=>{
+async function snapshot(page,ids){return page.evaluate(async partyIds=>{
  const {allEvents}=await import('./js/storage.js'),ledger=await import('./js/ledger.js'),money=await import('./js/money-services.js'),e=await allEvents();
- const cash={},balances={customer:{},supplier:{}};
- for(const c of ['YER','SAR','USD']){cash[c]=money.cashbook(e,c);balances.customer[c]=ledger.statement(e,customer,'0000-01-01','9999-12-31',c);balances.supplier[c]=ledger.statement(e,supplier,'0000-01-01','9999-12-31',c);}
+ const cash={},balances=Object.fromEntries(Object.keys(partyIds).map(role=>[role,{}]));
+ for(const c of ['YER','SAR','USD']){cash[c]=money.cashbook(e,c);for(const [role,id] of Object.entries(partyIds))balances[role][c]=ledger.statement(e,id,'0000-01-01','9999-12-31',c);}
  return {cash,balances,audit:money.journalAudit(e),accountBalances:money.accountBalances(e),eventCount:e.length};
 },ids);}
 async function verifyBalances(page,ids,oracle){
@@ -107,13 +110,31 @@ async function verifyBalances(page,ids,oracle){
   assert.equal(actual.accountBalances[c].cash,cash.closing,c+' dashboard agrees with cashbook');
   let running=0;
   for(const row of cash.rows){running+=(row.direction==='in'?1:-1)*Math.round(row.amount*factor(c));assert.equal(row.runningBalance,displayAmount(running,c),c+' running cash at '+row.id);assert.ok(row.source&&row.at);}
-  for(const role of ['customer','supplier']){
+  for(const role of Object.keys(ids)){
    const statement=actual.balances[role][c];assert.equal(statement.closing,displayAmount(oracle.balances[role][c],c),role+' '+c+' balance');
    let balance=statement.opening;
    for(const row of statement.rows){balance=(Math.round(balance*factor(c))+Math.round(row.change*factor(c)))/factor(c);assert.equal(row.balance,balance,'statement running balance');}
   }
  }
  return actual;
+}
+async function verifyPartyCards(page,ids,oracle){
+ await closeSheets(page);await page.locator('[data-nav="parties"]').click();
+ for(const [role,id] of Object.entries(ids)){
+  const card=page.locator('#people-list .flat-card').filter({has:page.locator(`[data-action="editparty:${id}"]`)});
+  assert.equal(await card.count(),1,'one live account card for '+role);
+  const displayed=await card.locator('.balance-currency').evaluateAll(rows=>Object.fromEntries(rows.map(row=>[row.textContent.trim().split(':')[0],{amount:row.querySelector('b').textContent.trim(),label:row.querySelector('small').textContent.trim()}])));
+  for(const currency of currencyCodes){
+   const units=oracle.balances[role][currency];
+   assert.deepEqual(displayed[currency],{amount:expectedMoney(Math.abs(units),currency),label:units>0?'عليه / مطلوب من العميل':units<0?'له / مستحق للعميل':'خالص'},`${role} ${currency} live له وعليه card`);
+  }
+ }
+}
+async function verifyVisibleStatement(page,party,units,currency){
+ await action(page,'statements');await page.locator('#statement-form [name="partyId"]').selectOption(party.id);await page.locator('#statement-form [name="currency"]').selectOption(currency);await page.locator('#statement-form [type="submit"]').click();
+ const closing=await page.locator('#statement-result .data-row').last().locator('strong').textContent();
+ assert.equal(closing.trim(),expectedBalance(units,currency),party.name+' '+currency+' visible statement');
+ await closeSheets(page);
 }
 async function verifyReportMath(page,oracle,date){
  const actual=await page.evaluate(async date=>{
@@ -170,7 +191,9 @@ function assertCycleDocuments(cycle){
 }
 function assertCycleComplete(record){
  for(const key of required)assert.equal(record.sections[key]?.status,'PASS',`cycle ${record.cycle}: ${key} completed`);
- for(const currency of currencyCodes)for(const kind of ['debit','credit','transfer'])assert.equal(record.metrics.journals[currency][kind],1,`cycle ${record.cycle}: exactly one ${currency} ${kind}`);
+ for(const currency of currencyCodes)for(const kind of ['debit','credit','transfer'])assert.equal(record.metrics.journals[currency][kind],journalsPerKindPerCurrencyPerCycle,`cycle ${record.cycle}: five ${currency} ${kind} operations`);
+ assert.equal(record.sections.catalog.customerCount,customersPerCycle,'five distinct customers created in each independent book');
+ assert.equal(record.sections.catalog.itemCount,catalogItemsPerCycle,'five distinct items created in each independent book');
  assertCycleDocuments(record.cycle);
 }
 async function configureIdentity(page,cycle){
@@ -190,9 +213,9 @@ async function addParty(page,{name,phone,type='customer'}){
  await action(page,type==='customer'?'customer':'supplier');await page.locator('#party-form [name="name"]').fill(name);await page.locator('#party-form [name="phone"]').fill(phone);await page.locator('#party-form [type="submit"]').click();await page.locator('#party-form').waitFor({state:'detached'});
  const p=(await events(page)).find(e=>e.type==='party.add'&&e.payload.name===name)?.payload;assert.ok(p);assert.equal(p.phone,'967'+phone);return p;
 }
-async function addItem(page,cycle){
- const item={name:['أرز بسمتي','سكر أبيض','دقيق قمح','زيت طبخ','شاي أحمر'][cycle-1]+' '+cycle,units:{YER:200+cycle*13,SAR:725+cycle*37,USD:240+cycle*9}};
- await action(page,'items');await page.locator('#new-item').click();await page.locator('#item-form [name="name"]').fill(item.name);await page.locator('#item-form [name="barcode"]').fill('62800000000'+cycle);
+async function addItem(page,cycle,index=1){
+ const item={name:['أرز بسمتي','سكر أبيض','دقيق قمح','زيت طبخ','شاي أحمر'][index-1]+' '+cycle+'-'+index,units:{YER:200+cycle*13+index*7,SAR:725+cycle*37+index*11,USD:240+cycle*9+index*3}};
+ await action(page,'items');await page.locator('#new-item').click();await page.locator('#item-form [name="name"]').fill(item.name);await page.locator('#item-form [name="barcode"]').fill('6280000000'+cycle+index);
  for(const c of currencyCodes)await page.locator(`#item-form [name="${c}"]`).fill(String(displayAmount(item.units[c],c)));
  await page.locator('#item-form [type="submit"]').click();await page.locator('#new-item').waitFor();await closeSheets(page);return item;
 }
@@ -209,9 +232,14 @@ async function makeInvoice(page,{kind='sale',party,currency,item,qty,priceUnits,
  for(let i=1;i<lineCount;i++){await page.locator('#add-invoice-item').click();const row=page.locator('.item-entry').nth(i);await row.locator('.item-title').fill(item.name);await row.locator('.item-title').dispatchEvent('change');await row.locator('.item-price').fill(String(displayAmount(priceUnits,currency)));await row.locator('.item-qty').fill(String(qty));}
  await page.locator('#invoice-paid').fill(String(displayAmount(paidUnits,currency)));await page.locator('#invoice-form [name="notes"]').fill(note);await page.locator('#invoice-form [type="submit"]').click();const e=await saved(page,note);assert.equal(e.payload.total,displayAmount(priceUnits*qty*lineCount,currency));assert.equal(e.payload.paid,displayAmount(paidUnits,currency));await closeSheets(page);return e;
 }
-async function voucher(page,{kind,party,currency,units,note}){
+async function voucher(page,{kind,party,currency,units,note,doubleSubmit=false}){
  await action(page,kind);if(party)await page.locator('#money-form [name="partyId"]').selectOption(party.id);else await page.locator('#money-form [name="category"]').fill('نقل بضائع');
- await page.locator('#money-form [name="currency"]').selectOption(currency);await page.locator('#money-form [name="amount"]').fill(String(displayAmount(units,currency)));await page.locator('#money-form [name="notes"]').fill(note);await page.locator('#money-form [type="submit"]').click();return saved(page,note);
+ await page.locator('#money-form [name="currency"]').selectOption(currency);await page.locator('#money-form [name="amount"]').fill(String(displayAmount(units,currency)));await page.locator('#money-form [name="notes"]').fill(note);
+ const submit=page.locator('#money-form [type="submit"]');
+ if(doubleSubmit)await submit.evaluate(button=>{button.click();button.click();});else await submit.click();
+ const event=await saved(page,note);
+ assert.equal((await events(page)).filter(e=>e.payload?.notes===note).length,1,'rapid voucher submit records exactly one transaction');
+ return event;
 }
 async function simpleJournal(page,{kind,party,to,currency,units,method,note}){
  await closeSheets(page);await page.locator('[data-nav="journal"]').click();await page.locator(`[data-journal-kind="${kind}"]`).click();await page.locator('#journal-party').selectOption(party.id);
@@ -270,18 +298,30 @@ async function runCycle(cycle){
   record.initialBranding=await page.locator('#store-logo').evaluate(image=>({src:image.getAttribute('src'),naturalWidth:image.naturalWidth,naturalHeight:image.naturalHeight}));
   assert.ok(record.initialBranding.naturalWidth>0,'real restored branding loads before a test logo is configured');
   await page.evaluate(()=>{window.__rootRef=document.getElementById('wa-engine-root');});
-  let profile,customer,supplier,item,cashSale,creditSale,cashPurchase,receipt,journal,transfer;
-  const oracle={cash:Object.fromEntries(currencyCodes.map(c=>[c,{opening:0,incoming:0,outgoing:0}])),balances:{customer:{YER:0,SAR:0,USD:0},supplier:{YER:0,SAR:0,USD:0}},activity:Object.fromEntries(currencyCodes.map(c=>[c,{sales:0,purchases:0,expenses:0,receipts:0,payments:0,cashSales:0,cashPurchases:0,count:0,salesCount:0}]))};
+  let profile,customer,recipientCustomer,supplier,item,cashSale,creditSale,cashPurchase,receipt,journal,transfer;
+  const oracle={cash:Object.fromEntries(currencyCodes.map(c=>[c,{opening:0,incoming:0,outgoing:0}])),balances:{customer:{YER:0,SAR:0,USD:0},recipient:{YER:0,SAR:0,USD:0},supplier:{YER:0,SAR:0,USD:0}},activity:Object.fromEntries(currencyCodes.map(c=>[c,{sales:0,purchases:0,expenses:0,receipts:0,payments:0,cashSales:0,cashPurchases:0,count:0,salesCount:0}]))};
   const currency=currencyCodes[(cycle-1)%3];
   await section('identity',async()=>{profile=await configureIdentity(page,cycle);return {brand:profile.name,logoChanged:true,documents:'pending actual captures for all document kinds'};},{deferPdf:true});
   await section('catalog',async()=>{
-   customer=await addParty(page,{name:['محمد الصنعاني','أحمد العدني','خالد التعزي','علي الإبي','صالح الحضرمي'][cycle-1]+' - اختبار',phone:'77123456'+cycle});
-   supplier=await addParty(page,{name:'مورد جملة - تجربة '+cycle,phone:'78123456'+cycle,type:'supplier'});item=await addItem(page,cycle);
-   await page.locator('[data-nav="journal"]').click();assert.ok((await page.locator('#journal-party').textContent()).includes(customer.name));assert.ok((await page.locator('#journal-to-party').textContent()).includes(supplier.name));
+   const customers=[],items=[];
+   for(let index=1;index<=customersPerCycle;index++)customers.push(await addParty(page,{name:['محمد الصنعاني','أحمد العدني','خالد التعزي','علي الإبي','صالح الحضرمي'][index-1]+' - اختبار '+cycle+'-'+index,phone:'77'+cycle+String(123450+index)}));
+   [customer,recipientCustomer]=customers;
+   supplier=await addParty(page,{name:'مورد جملة - تجربة '+cycle,phone:'78123456'+cycle,type:'supplier'});
+   for(let index=1;index<=catalogItemsPerCycle;index++)items.push(await addItem(page,cycle,index));
+   item=items[(cycle-1)%items.length];
+   await action(page,'sales');
+   for(const party of customers)assert.ok((await page.locator('#invoice-party').textContent()).includes(party.name),'each new customer appears immediately in invoices');
+   for(const catalogItem of items)assert.ok((await page.locator('#qatfah-products').innerHTML()).includes(catalogItem.name),'each new item appears immediately in invoices');
+   await action(page,'daily-sales');
+   for(const party of customers)assert.ok((await page.locator('#daily-party').textContent()).includes(party.name),'each new customer appears immediately in daily sales');
+   await page.locator('#daily-party').selectOption(customer.id);await page.locator('#daily-add-sale').click();
+   for(const catalogItem of items)assert.ok((await page.locator('#qatfah-products').innerHTML()).includes(catalogItem.name),'each new item appears immediately in daily sale editor');
+   await closeSheets(page);await page.locator('[data-nav="journal"]').click();
+   for(const party of [...customers,supplier])for(const selector of ['#journal-party','#journal-to-party'])assert.ok((await page.locator(selector).textContent()).includes(party.name),'every customer/supplier appears immediately in simple journal');
    await page.locator('#journal-amount').fill('17');await page.locator('#journal-notes').fill('مسودة لا تضيع بعد الإضافة الفورية');await page.locator('#journal-add-party').click();await page.locator('#journal-party-name').fill('حساب فوري '+cycle);await page.locator('#journal-party-phone').fill('73123456'+cycle);await page.locator('#journal-party-save').click();await page.locator('#journal-quick-party').waitFor({state:'hidden'});assert.equal(await page.locator('#journal-amount').inputValue(),'17');assert.equal(await page.locator('#journal-notes').inputValue(),'مسودة لا تضيع بعد الإضافة الفورية');assert.ok((await page.locator('#journal-to-party').textContent()).includes('حساب فوري '+cycle));
-   return {customer:customer.phone,supplier:supplier.phone,item:item.name,inlinePartyPreservesDraft:true};
+   return {customer:customer.phone,supplier:supplier.phone,customerCount:customers.length,itemCount:items.length,customerPhones:customers.map(p=>p.phone),items:items.map(p=>p.name),inlinePartyPreservesDraft:true,allInvoiceDailyAndJournalListsVerified:true};
   });
-  const ids={customer:customer.id,supplier:supplier.id};
+  const ids={customer:customer.id,recipient:recipientCustomer.id,supplier:supplier.id};
   for(const c of currencyCodes)await opening(page,c,c==='YER'?20000+cycle*250:20000+cycle*125,oracle);
   await verifyBalances(page,ids,oracle);
   await section('cash_sales',async()=>{
@@ -294,18 +334,22 @@ async function runCycle(cycle){
    const price=Math.floor(item.units[currency]/2);
    cashPurchase=await makeInvoice(page,{kind:'purchase',party:supplier,currency,item,qty:1,priceUnits:price,paidUnits:price,note:`C${cycle}-cash-purchase`});oracle.cash[currency].outgoing+=price;oracle.activity[currency].purchases+=price;oracle.activity[currency].cashPurchases+=price;oracle.activity[currency].count++;
    await makeInvoice(page,{kind:'purchase',party:supplier,currency,item,qty:2,priceUnits:price,paidUnits:0,note:`C${cycle}-credit-purchase`});oracle.balances.supplier[currency]-=price*2;oracle.activity[currency].purchases+=price*2;oracle.activity[currency].count++;
-   const received=Math.floor(item.units[currency]*3/4);receipt=await voucher(page,{kind:'receipts',party:customer,currency,units:received,note:`C${cycle}-receipt`});oracle.cash[currency].incoming+=received;oracle.balances.customer[currency]-=received;oracle.activity[currency].receipts+=received;oracle.activity[currency].count++;
-   await voucher(page,{kind:'payments',party:supplier,currency,units:price,note:`C${cycle}-payment`});oracle.cash[currency].outgoing+=price;oracle.balances.supplier[currency]+=price;oracle.activity[currency].payments+=price;oracle.activity[currency].count++;
-   const expense=currency==='YER'?31+cycle:117+cycle;await voucher(page,{kind:'expenses',currency,units:expense,note:`C${cycle}-expense`});oracle.cash[currency].outgoing+=expense;oracle.activity[currency].expenses+=expense;oracle.activity[currency].count++;await verifyBalances(page,ids,oracle);return {cashPurchase:true,creditPurchase:true,receipt:true,payment:true,expense:true};
+   const received=Math.floor(item.units[currency]*3/4);receipt=await voucher(page,{kind:'receipts',party:customer,currency,units:received,note:`C${cycle}-receipt`,doubleSubmit:true});oracle.cash[currency].incoming+=received;oracle.balances.customer[currency]-=received;oracle.activity[currency].receipts+=received;oracle.activity[currency].count++;
+   await voucher(page,{kind:'payments',party:supplier,currency,units:price,note:`C${cycle}-payment`,doubleSubmit:true});oracle.cash[currency].outgoing+=price;oracle.balances.supplier[currency]+=price;oracle.activity[currency].payments+=price;oracle.activity[currency].count++;
+   const expense=currency==='YER'?31+cycle:117+cycle;await voucher(page,{kind:'expenses',currency,units:expense,note:`C${cycle}-expense`,doubleSubmit:true});oracle.cash[currency].outgoing+=expense;oracle.activity[currency].expenses+=expense;oracle.activity[currency].count++;await verifyBalances(page,ids,oracle);return {cashPurchase:true,creditPurchase:true,receipt:true,payment:true,expense:true,rapidSubmitOnce:true};
   });
   await section('journals',async()=>{
    for(const c of currencyCodes){
-    const debit=c==='YER'?300+cycle*11:3001+cycle*11,credit=cycle===5?debit*2:(c==='YER'?100+cycle*3:1003+cycle*7),moved=c==='YER'?50+cycle:501+cycle,method=cycle%2?'cash':'book';
-    journal=await simpleJournal(page,{kind:'debit',party:customer,currency:c,units:debit,method,note:`C${cycle}-${c}-debit`});oracle.balances.customer[c]+=debit;if(method==='cash')oracle.cash[c].outgoing+=debit;record.metrics.journals[c].debit++;oracle.activity[c].count++;await verifyBalances(page,ids,oracle);
-    await simpleJournal(page,{kind:'credit',party:customer,currency:c,units:credit,method,note:`C${cycle}-${c}-credit`});oracle.balances.customer[c]-=credit;if(method==='cash')oracle.cash[c].incoming+=credit;record.metrics.journals[c].credit++;oracle.activity[c].count++;await verifyBalances(page,ids,oracle);
-    transfer=await simpleJournal(page,{kind:'transfer',party:customer,to:supplier,currency:c,units:moved,method:'book',note:`C${cycle}-${c}-transfer`});oracle.balances.customer[c]-=moved;oracle.balances.supplier[c]+=moved;record.metrics.journals[c].transfer++;oracle.activity[c].count++;const check=await verifyBalances(page,ids,oracle);assert.equal(check.cash[c].rows.some(x=>x.id===transfer.id),false);
+    for(let repetition=1;repetition<=journalsPerKindPerCurrencyPerCycle;repetition++){
+     const debit=c==='YER'?300+cycle*11+repetition*13:3001+cycle*11+repetition*17,credit=repetition===5?debit*5:(c==='YER'?100+cycle*3+repetition*7:1003+cycle*7+repetition*9),moved=c==='YER'?50+cycle+repetition*3:501+cycle+repetition*11,method=(cycle+repetition)%2?'cash':'book';
+     journal=await simpleJournal(page,{kind:'debit',party:customer,currency:c,units:debit,method,note:`C${cycle}-${c}-debit-${repetition}`});oracle.balances.customer[c]+=debit;if(method==='cash')oracle.cash[c].outgoing+=debit;record.metrics.journals[c].debit++;oracle.activity[c].count++;await verifyBalances(page,ids,oracle);
+     await simpleJournal(page,{kind:'credit',party:customer,currency:c,units:credit,method,note:`C${cycle}-${c}-credit-${repetition}`});oracle.balances.customer[c]-=credit;if(method==='cash')oracle.cash[c].incoming+=credit;record.metrics.journals[c].credit++;oracle.activity[c].count++;await verifyBalances(page,ids,oracle);
+     transfer=await simpleJournal(page,{kind:'transfer',party:customer,to:recipientCustomer,currency:c,units:moved,method:'book',note:`C${cycle}-${c}-transfer-${repetition}`});oracle.balances.customer[c]-=moved;oracle.balances.recipient[c]+=moved;record.metrics.journals[c].transfer++;oracle.activity[c].count++;const check=await verifyBalances(page,ids,oracle);assert.equal(check.cash[c].rows.some(x=>x.id===transfer.id),false);
+     await verifyPartyCards(page,ids,oracle);
+    }
+    for(const [role,party] of [['customer',customer],['recipient',recipientCustomer],['supplier',supplier]])await verifyVisibleStatement(page,party,oracle.balances[role][c],c);
    }
-   await page.screenshot({path:resolve(output,'screenshots',`cycle-${cycle}-journal.png`),fullPage:true});return {perCurrency:record.metrics.journals,cashAndBookModesAcrossCycles:true};
+   await page.locator('[data-nav="journal"]').click();await page.screenshot({path:resolve(output,'screenshots',`cycle-${cycle}-journal.png`),fullPage:true});return {perCurrency:record.metrics.journals,cashAndBookModesInEveryCycle:true,customerToCustomerTransfers:true,livePartyCardsAndStatementsVerified:true};
   });
   await section('cash_reports',async()=>{
    if(cycle===5)for(let i=1;i<=12;i++){const units=10+i;await directCash(page,{currency,units,direction:'in',category:'capital',note:`C${cycle}-extra-capital-${i}`});oracle.cash[currency].incoming+=units;oracle.activity[currency].count++;}
@@ -327,7 +371,7 @@ async function runCycle(cycle){
    await sendDocument(page,`[data-event="share:${receipt.id}"]`,{cycle,kind:'voucher',phone:customer.phone,profile});
    await sendDocument(page,`[data-event="share:${journal.id}"]`,{cycle,kind:'simple-journal',phone:customer.phone,profile});
    await sendDocument(page,`[data-event="share:${transfer.id}:${customer.id}"]`,{cycle,kind:'transfer-source',phone:customer.phone,profile});
-   await sendDocument(page,`[data-event="share:${transfer.id}:${supplier.id}"]`,{cycle,kind:'transfer-destination',phone:supplier.phone,profile});
+   await sendDocument(page,`[data-event="share:${transfer.id}:${recipientCustomer.id}"]`,{cycle,kind:'transfer-destination',phone:recipientCustomer.phone,profile});
    await page.evaluate(()=>window.__qatfahVerification.mode='unlinked');await sendDocument(page,`[data-event="share:${cashSale.id}"]`,{cycle,kind:'unlinked-negative',phone:customer.phone,profile,expectError:true});await page.evaluate(()=>window.__qatfahVerification.mode='accepted');
    await action(page,'statements');await page.locator('#statement-form [name="partyId"]').selectOption(customer.id);await page.locator('#statement-form [name="currency"]').selectOption(currency);await page.locator('#statement-form [type="submit"]').click();
    const balanceText=expectedBalance(oracle.balances.customer[currency],currency);
@@ -348,7 +392,7 @@ async function runCycle(cycle){
    return {nativeCalls:10,pdfDocuments:9,zeroModal:true,zeroPopup:true,zeroJavascriptDialog:true,zeroShareSheet:true,zeroPreview:true,sameRecipient:true,doubleClickGuard:true,errorUnlock:true,liveWhatsapp:'NOT_RUN'};
   });
   await section('persistence',async()=>{
-   const before=await events(page);await page.reload();await page.locator('#app-shell').waitFor({state:'visible'});assert.deepEqual(await events(page),before,'real IndexedDB survives reload');await verifyBalances(page,ids,oracle);await writeFile(resolve(output,`cycle-${cycle}-events.json`),json(before));await writeFile(resolve(output,`cycle-${cycle}-oracle.json`),json(oracle));assert.deepEqual(pageErrors,[],'no browser runtime errors');assert.deepEqual(dialogs,[],'no unexpected JavaScript dialogs in any section');return {eventCount:before.length,indexedDB:true};
+   const before=await events(page);for(const kind of ['receipt','payment','expense'])assert.equal(before.filter(e=>e.payload?.notes===`C${cycle}-${kind}`).length,1,kind+' remains unique after all later transactions');await page.reload();await page.locator('#app-shell').waitFor({state:'visible'});assert.deepEqual(await events(page),before,'real IndexedDB survives reload');await verifyBalances(page,ids,oracle);await writeFile(resolve(output,`cycle-${cycle}-events.json`),json(before));await writeFile(resolve(output,`cycle-${cycle}-oracle.json`),json(oracle));assert.deepEqual(pageErrors,[],'no browser runtime errors');assert.deepEqual(dialogs,[],'no unexpected JavaScript dialogs in any section');return {eventCount:before.length,indexedDB:true,voucherUniquenessPersisted:true};
   });
   assertCycleComplete(record);record.status='PASS';record.oracle=oracle;
  }catch(error){record.status='FAIL';record.error=error.stack;results.errors.push({cycle,error:error.stack});for(const section of required){if(!record.sections[section])record.sections[section]={status:'BLOCKED',reason:'Earlier prerequisite failed'};else if(record.sections[section].status==='PENDING_PDF')record.sections[section]={...record.sections[section],status:'BLOCKED',reason:'Required PDF captures or their accounting assertions did not complete'};}try{await page.screenshot({path:resolve(output,'screenshots',`cycle-${cycle}-failure.png`),fullPage:true});await writeFile(resolve(output,`cycle-${cycle}-failure.html`),await page.content());}catch{}console.error(error.stack);
@@ -362,13 +406,14 @@ finally{
  if(browser)await browser.close();await new Promise(ok=>server.close(ok));results.finishedAt=new Date().toISOString();
  const requiredSectionsPassed=results.cycles.every(record=>required.every(key=>record.sections[key]?.status==='PASS'));
  const journalCounts=Object.fromEntries(currencyCodes.map(currency=>[currency,Object.fromEntries(['debit','credit','transfer'].map(kind=>[kind,results.cycles.reduce((sum,record)=>sum+(record.metrics.journals[currency]?.[kind]||0),0)]))]));
- const fiveJournalsPerKindAndCurrency=currencyCodes.every(currency=>['debit','credit','transfer'].every(kind=>journalCounts[currency][kind]===5));
+ const fiveJournalsPerKindAndCurrencyPerCycle=results.cycles.every(record=>currencyCodes.every(currency=>['debit','credit','transfer'].every(kind=>record.metrics.journals[currency][kind]===journalsPerKindPerCurrencyPerCycle)));
+ const journalCoverageComplete=fiveJournalsPerKindAndCurrencyPerCycle&&currencyCodes.every(currency=>['debit','credit','transfer'].every(kind=>journalCounts[currency][kind]===cycles*journalsPerKindPerCurrencyPerCycle));
  const requiredDocumentsCaptured=results.cycles.every(record=>{
   const docs=results.documents.filter(d=>d.cycle===record.cycle);
   return docs.length===requiredPdfKinds.length&&requiredPdfKinds.every(kind=>docs.filter(d=>d.kind===kind).length===1)&&new Set(docs.map(d=>d.path)).size===requiredPdfKinds.length;
  });
- results.gateChecks={requiredSectionsPassed,journalCounts,fiveJournalsPerKindAndCurrency,requiredDocumentsCaptured,expectedPdfKinds:requiredPdfKinds};
- results.allAutomatedCyclesPassed=cycles===5&&results.cycles.length===5&&new Set(results.cycles.map(x=>x.cycle)).size===5&&results.cycles.every(x=>x.status==='PASS')&&requiredSectionsPassed&&fiveJournalsPerKindAndCurrency&&requiredDocumentsCaptured&&results.errors.length===0;
+ results.gateChecks={requiredSectionsPassed,journalCounts,journalsPerKindPerCurrencyPerCycle,fiveJournalsPerKindAndCurrencyPerCycle,journalCoverageComplete,requiredDocumentsCaptured,expectedPdfKinds:requiredPdfKinds};
+ results.allAutomatedCyclesPassed=cycles===5&&results.cycles.length===5&&new Set(results.cycles.map(x=>x.cycle)).size===5&&results.cycles.every(x=>x.status==='PASS')&&requiredSectionsPassed&&journalCoverageComplete&&requiredDocumentsCaptured&&results.errors.length===0;
  await writeFile(resolve(output,'browser-results.json'),json(results));console.log(json({cycles:results.cycles.map(x=>({cycle:x.cycle,status:x.status})),documents:results.documents.length,gateChecks:results.gateChecks,allAutomatedCyclesPassed:results.allAutomatedCyclesPassed,liveWhatsapp:results.liveWhatsapp}));
 }
 if(results.cycles.length!==cycles||results.cycles.some(x=>x.status!=='PASS')||results.errors.length)process.exitCode=1;

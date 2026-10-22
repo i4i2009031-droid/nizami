@@ -11,6 +11,7 @@ const cloudDispatch=cloudSender({accounts:process.env.QATFAH_WA_CLOUD_ACCOUNTS||
 import {googleDrive,driveConfigured} from './google-drive.mjs';
 import {validateSimpleJournal,validateCashMovement,validateExchange,validateRemittance,validateAccountTransfer,financialPostings} from '../apps/client/js/money-services.js';
 import {prepareEventImport} from '../apps/client/js/storage.js';
+import {invoiceItemsTotal} from '../apps/client/js/invoice-math.js';
 
 const PORT = Number(process.env.QATFAH_PORT || 5059);
 const dataDir = resolve(process.env.QATFAH_DATA_DIR || resolve(fileURLToPath(new URL('./data/',import.meta.url))));
@@ -55,11 +56,19 @@ function assertValidEvent(e){
  if(!['YER','USD','SAR'].includes(currency))throw httpError(422,'CURRENCY_INVALID','عملة غير مدعومة');
  if(e.type==='invoice.create'){
    if(!['sale','purchase'].includes(p.kind)||!['cash','credit'].includes(p.payment)||!Array.isArray(p.items)||!p.items.length||p.items.length>80||!validMoney(p.total,currency))throw httpError(422,'INVOICE_INVALID','بيانات الفاتورة غير صالحة');
-   const sum=p.items.reduce((s,x)=>s+Number(x.qty)*Number(x.price),0);
-   const rounded=currency==='YER'?Math.round(sum):Math.round(sum*100)/100;
+   if(p.roundingMode!==undefined&&p.roundingMode!=='per_line')throw httpError(422,'INVOICE_ROUNDING','طريقة تقريب الفاتورة غير مدعومة');
+   if(p.items.some(x=>!x||typeof x!=='object'||!str(x.title,200)||!['number','string'].includes(typeof x.qty)||!Number.isFinite(Number(x.qty))||!(Number(x.qty)>0)||Number(x.qty)>1e6||!validMoney(x.price,currency)))throw httpError(422,'INVOICE_TOTAL','بيانات بنود الفاتورة غير صالحة');
+   let rounded;
+   if(p.roundingMode==='per_line'){
+     try{rounded=invoiceItemsTotal(p.items,currency);}catch{throw httpError(422,'INVOICE_TOTAL','الإجمالي أو دقة بنود الفاتورة غير صالح');}
+   }else{
+     // Historical unflagged documents retain the aggregation used when saved.
+     const sum=p.items.reduce((s,x)=>s+Number(x.qty)*Number(x.price),0);
+     rounded=currency==='YER'?Math.round(sum):Math.round(sum*100)/100;
+   }
    const paid=p.paid??(p.payment==='cash'?p.total:0);
    if(!validMoney(paid,currency)||paid>p.total||(p.payment==='cash'&&paid!==p.total)||(p.payment==='credit'&&!p.partyId))throw httpError(422,'PAID_INVALID','المبلغ المدفوع غير صحيح');
-   if(p.items.some(x=>!str(x.title,200)||!(Number(x.qty)>0)||Number(x.qty)>1e6||!validMoney(x.price,currency))||Math.abs(rounded-p.total)>0.00001)throw httpError(422,'INVOICE_TOTAL','الإجمالي لا يطابق الأصناف');
+   if(Math.abs(rounded-p.total)>0.00001)throw httpError(422,'INVOICE_TOTAL','الإجمالي لا يطابق الأصناف');
  }else if(['receipt.create','payment.create','expense.create'].includes(e.type)){
    if(!validMoney(p.amount,currency)||p.amount===0)throw httpError(422,'AMOUNT_INVALID','المبلغ غير صالح');
  }else if(e.type==='balance.open'){if(!p.partyId||!['receivable','payable'].includes(p.direction)||!validMoney(p.amount,currency)||p.amount===0)throw httpError(422,'OPENING_INVALID','الرصيد الافتتاحي غير صالح');

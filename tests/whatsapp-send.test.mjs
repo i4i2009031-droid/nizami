@@ -96,6 +96,13 @@ for(const [label,result,code] of [
  ['queued without ack',{id:`true_${JID}_A0`,ack:0},'ack_not_confirmed'],
  ['negative ack',{id:`true_${JID}_ERR`,ack:-1},'ack_not_confirmed'],
  ['invalid ack',{id:`true_${JID}_ERR`,ack:9},'ack_not_confirmed'],
+ ['boolean ack',{id:`true_${JID}_ERR`,ack:true},'ack_not_confirmed'],
+ ['string ack',{id:`true_${JID}_ERR`,ack:'1'},'ack_not_confirmed'],
+ ['fractional ack',{id:`true_${JID}_ERR`,ack:1.5},'ack_not_confirmed'],
+ ['contradictory network result',{id:`true_${JID}_ERR`,ack:1,sendMsgResult:{messageSendResult:'ERROR_NETWORK'}},'ack_result_conflict'],
+ ['contradictory upload result',{id:`true_${JID}_ERR`,ack:2,sendMsgResult:{messageSendResult:'ERROR_UPLOAD'}},'ack_result_conflict'],
+ ['malformed send result',{id:`true_${JID}_ERR`,ack:1,sendMsgResult:{}},'ack_result_conflict'],
+ ['legacy failure send result',{id:`true_${JID}_ERR`,ack:1,sendMsgResult:'ERROR_NETWORK'},'ack_result_conflict'],
  ['other recipient',{id:'true_967700000001@c.us_WRONG',ack:1},'ack_recipient_mismatch'],
  ['unmapped LID',{id:'true_999999999@lid_WRONG',ack:1},'ack_recipient_mismatch'],
  ['conflicting to field',{id:`true_${JID}_RIGHT`,to:'967700000001@c.us',ack:1},'ack_recipient_mismatch'],
@@ -104,11 +111,13 @@ for(const [label,result,code] of [
  const h=harness({result});await h.start();assert.equal(h.status().phase,'uncertain');assert.equal(h.status().code,code);
  assert.equal(h.status().submitted,false);assert.equal(h.status().dispatched,true);assert.equal(h.status().safeToFallback,false);
  await h.tick(200000);assert.equal(h.calls.filter(x=>x.kind==='file').length,1);assert.deepEqual(h.forbidden,[]);
+ assert.equal(h.prepare(),false,'an uncertain result must not permit request ID replay');
 });
 
 test('rejection after invoking WA-JS remains uncertain with no second transport',async()=>{
  const h=harness({send:()=>Promise.reject(Error('upload failed'))});await h.start();
  assert.equal(h.status().phase,'uncertain');assert.equal(h.status().code,'wpp_operation_failed');assert.equal(h.status().dispatched,true);
+ assert.equal(h.prepare(),false,'a rejected Promise may already have queued the request');
  assert.equal(h.calls.filter(x=>x.kind==='file').length,1);assert.deepEqual(h.forbidden,[]);
 });
 
@@ -125,6 +134,7 @@ test('timeout releases visible operation but blocks dispatch while original netw
  assert.equal(h.prepare({requestId:'duplicate'}),false);h.driver.cancel();assert.equal(h.prepare({requestId:'duplicate'}),false);
  pending.resolve({id:`true_${JID}_LATE`,ack:1});await flush();
  assert.equal(h.status().phase,'uncertain','late completion must not change a finished button result');
+ assert.equal(h.prepare(),false,'late completion cannot reopen the original request ID for replay');
  assert.equal(h.prepare({requestId:'new-explicit-attempt'}),true);
  assert.equal(h.calls.filter(x=>x.kind==='file').length,1);
 });
@@ -139,6 +149,20 @@ test('cancellation before recipient lookup completes prevents dispatch and ignor
 test('successful request ids cannot be replayed, even with another recipient',async()=>{
  const h=harness();await h.start();assert.equal(h.prepare(),false);assert.equal(h.prepare({phone:'967700000001'}),false);
  assert.equal(h.calls.filter(x=>x.kind==='file').length,1);
+});
+
+test('completed request replay remains blocked after many later sends in the same engine',async()=>{
+ const h=harness();await h.start();
+ for(let index=0;index<40;index++)await h.start({requestId:'later-'+index});
+ assert.equal(h.prepare(),false,'do not evict earlier dispatched IDs while the engine is alive');
+ assert.equal(h.calls.filter(x=>x.kind==='file').length,41);assert.deepEqual(h.forbidden,[]);
+});
+
+test('a request that failed before dispatch can safely be retried after restoring authentication',async()=>{
+ const h=harness({authenticated:false});await h.start();
+ assert.equal(h.status().dispatched,false);h.wpp.conn.isAuthenticated=()=>true;
+ await h.start();assert.equal(h.status().submitted,true);
+ assert.equal(h.calls.filter(x=>x.kind==='file').length,1);assert.deepEqual(h.forbidden,[]);
 });
 
 test('repeated adapter injection retains the same controller and its in-flight lock',async()=>{

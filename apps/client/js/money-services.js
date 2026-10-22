@@ -1,7 +1,7 @@
 /** Financial operations inspired by exchange/remittance workflow categories. All amounts
  * are stored by currency; a conversion MUST contain both legs and an explicit rate.
  * Standalone local original implementation, not decompiled Dart bytecode. */
-import {activeRecords,CURRENCIES,currencyOf,dateOnly,toMinor,fromMinor,addUnits} from './accounting-primitives.js';
+import {activeRecords,CURRENCIES,currencyOf,dateOnly,toMinor,fromMinor,addUnits,chronologicalOrder} from './accounting-primitives.js';
 export {minorFactor,toMinor,fromMinor} from './accounting-primitives.js';
 
 export const MONEY_ACCOUNTS = Object.freeze(['cash','bank']);
@@ -52,6 +52,12 @@ export function validateCashMovement(payload){
  if(p.direction==='in'?category!=='capital':!['expense','withdrawal'].includes(category))throw Error('نوع حركة الصندوق لا يطابق اتجاهها');
  return {...p,category,amount:fromMinor(amountPositive(p.amount,p.currency),p.currency),notes:normalizedNotes(p.notes)};
 }
+function canonicalMoney(value,currency,positive=true){
+ if(typeof value!=='number')throw Error('المبلغ يجب أن يكون رقمًا محفوظًا بدقة العملة');
+ const units=toMinor(value,currency);
+ if((positive&&units<=0)||fromMinor(units,currency)!==value)throw Error('المبلغ لا يطابق دقة العملة المختارة');
+ return units;
+}
 /** Validated both at save and at restore boundaries. New events cannot store a
  * partial transfer or an invalid amount even when entered outside their form. */
 export function validateNewAccountingEvents(events){
@@ -60,7 +66,25 @@ export function validateNewAccountingEvents(events){
  // catalogue for every journal entry would make large local books quadratic.
  const people=activeParties(events);
  for(const event of events){
-  let value;
+  let value;const p=event.payload||{},legacyTypes=['invoice.create','receipt.create','payment.create','expense.create','balance.open','cash.open'];
+  if(legacyTypes.includes(event.type)){
+   // Older logs omit currency/paid; keep their established YER and cash/credit
+   // defaults. Explicitly inconsistent or over-precision amounts must never
+   // be silently rounded by projections after restore.
+   if(p.currency!==undefined&&!Object.hasOwn(CURRENCIES,p.currency))throw Error('عملة العملية غير مدعومة');
+   const currency=currencyOf(p);
+   if(event.type==='invoice.create'){
+    const total=canonicalMoney(p.total,currency),paid=canonicalMoney(p.paid??(p.payment==='cash'?p.total:0),currency,false);
+    if(paid>total||(p.payment==='cash'&&paid!==total))throw Error('الفاتورة النقدية يجب أن تكون مسددة بالكامل ولا يجوز تجاوز إجمالي الفاتورة');
+    if(p.payment!==undefined&&!['cash','credit'].includes(p.payment))throw Error('طريقة دفع الفاتورة غير صالحة');
+    if(p.payment==='credit'&&!String(p.partyId||'').trim())throw Error('الفاتورة الآجلة تحتاج حساب العميل أو المورد');
+   }else{
+    canonicalMoney(p.amount,currency);
+    if(event.type==='cash.open'&&!MONEY_ACCOUNTS.includes(p.account))throw Error('حساب الرصيد الافتتاحي غير صالح');
+    if(event.type==='balance.open'&&!['receivable','payable'].includes(p.direction))throw Error('اتجاه الرصيد الافتتاحي غير صالح');
+   }
+   if(typeof event.at!=='string'||!Number.isFinite(Date.parse(event.at)))throw Error('تاريخ العملية غير صالح');
+  }
   if(event.type==='journal.create'){
    value=validateSimpleJournal(event.payload);
    if(active.has(event.id))assertJournalParties(value,people);
@@ -245,7 +269,7 @@ export function cashbook(events,currency='YER',from='0000-01-01',to='9999-12-31'
   if(!groups.has(posting.eventId))groups.set(posting.eventId,{inUnits:0,outUnits:0});
   const group=groups.get(posting.eventId),side=posting.side==='debit'?'inUnits':'outUnits';group[side]=addUnits(group[side],posting.units);
  }
- const ordered=[...groups.entries()].map(([id,units])=>({event:byId.get(id),...units})).sort((a,b)=>a.event.at.localeCompare(b.event.at)||a.event.id.localeCompare(b.event.id));
+ const ordered=[...groups.entries()].map(([id,units])=>({event:byId.get(id),...units})).sort((a,b)=>chronologicalOrder(a.event,b.event));
  let startingUnits=0,openingUnits=0,incomingUnits=0,outgoingUnits=0,runningUnits=0;const rows=[],openingEntries=[];
  for(const {event,inUnits,outUnits} of ordered){
   const day=dateOnly(event.at),changeUnits=inUnits-outUnits;
