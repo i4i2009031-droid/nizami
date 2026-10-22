@@ -9,6 +9,8 @@ import {accountBalances,cashbook,validateSimpleJournal,validateCashMovement} fro
 import {buildEventDocument,makeEventDocument} from './documents.js';
 import {createWhatsappSession,createWhatsappPairing,createWhatsappSender,whatsappSendMessage,whatsappSendDetails,normalizeYemenPhone,latinPhoneDigits} from './whatsapp-session.js';
 import {createEventBatch,invoiceEventEntries} from './event-batch.js';
+import {chronologicalOrder,toMinor,fromMinor} from './accounting-primitives.js';
+import {invoiceLineAmount,invoiceItemsTotal,dailySalesFigures,nextInvoiceNumber} from './invoice-math.js';
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const toast=message=>{const e=$('toast');e.textContent=message;e.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>e.classList.remove('show'),3300);};
@@ -87,7 +89,7 @@ async function record(type,payload,{renderPage=true}={}){const e={id:crypto.rand
 async function recordBatch(entries){const events=createEventBatch(entries);await commitEvents(events);state.events=await allEvents();render();refreshLivePickers();toast('تم حفظ العملية على الجهاز ✓');return events;}
 function render(){if(!state.session)return;const p=store();$('store-name').textContent=p.name||state.session.user.storeName||'قطفة';$('store-subtitle').textContent=state.session.mode==='demo'?'دفتر حسابات محلي':'دفتر حسابات المحل';$('store-logo').src=p.logo||'./assets/icon-192.png';setNetworkBadge();document.querySelectorAll('[data-nav]').forEach(x=>x.classList.toggle('active',x.dataset.nav===state.screen));$('home-page').hidden=state.screen!=='home';$('content-page').hidden=state.screen==='home';if(state.screen==='home')renderHome();else if(state.screen==='invoices')renderInvoices();else if(state.screen==='parties')renderParties();else if(state.screen==='reports')renderReports();else if(state.screen==='journal')renderSimpleJournal();else if(state.screen==='cashbook')renderCashbook();else renderSettings();}
 function setScreen(page){if(!$('sheet-backdrop').hidden)closeSheet();state.screen=page;render();window.scrollTo({top:0,behavior:'smooth'});}
-function renderHome(){const s=summary(state.events),cashYER=accountBalances(state.events).YER.cash,today=summary(state.events,localDate(),localDate());const recent=activeRecords(state.events).filter(e=>!['settings.update','party.add'].includes(e.type)).sort((a,b)=>b.at.localeCompare(a.at)).slice(0,5),people=parties(state.events);
+function renderHome(){const s=summary(state.events),cashYER=accountBalances(state.events).YER.cash,today=summary(state.events,localDate(),localDate());const recent=activeRecords(state.events).filter(e=>!['settings.update','party.add'].includes(e.type)).sort((a,b)=>chronologicalOrder(b,a)).slice(0,5),people=parties(state.events);
  $('home-page').innerHTML=`
  <section class="balance-card"><small>رصيد صندوق الريال اليمني (يشمل الصرافة والحوالات)</small><strong class="big-number">${money(cashYER)}</strong>
  <div class="balance-sub"><div><small>مبيعات اليوم (يمني)</small><strong>${money(today.sales)}</strong></div><div><small>مشتريات اليوم (يمني)</small><strong>${money(today.purchases)}</strong></div></div></section><div class="currency-strip">${summaryByCurrency(state.events,localDate(),localDate()).map(x=>`<div><small>${x.currency}</small><strong>${money(x.sales,x.currency)}</strong></div>`).join('')}</div>
@@ -96,7 +98,7 @@ function renderHome(){const s=summary(state.events),cashYER=accountBalances(stat
  <div class="section-title"><h2>آخر العمليات</h2><button class="text-button" data-nav-open="invoices">عرض الكل ←</button></div>
  <div class="recent-list">${recent.length?recent.map(e=>{const d=describeEvent(e,people);return `<div class="recent-item"><span class="recent-icon ${['expense.create','payment.create'].includes(e.type)?'expense':''}">${['invoice.create'].includes(e.type)?'▤':'↔'}</span><div class="recent-info"><b>${esc(d.title)} · ${esc(d.sub)}</b><small>${dateOnly(e.at)}</small></div><span class="recent-number">${money(d.amount,d.currency)}</span></div>`;}).join(''):'<div class="empty"><span class="emoji">🧾</span>لا توجد عمليات بعد. ابدأ بإنشاء فاتورة.</div>'}</div>
  `;}
-function renderInvoices(){const p=parties(state.events),records=activeRecords(state.events).filter(e=>['invoice.create','receipt.create','payment.create','expense.create','journal.create','cash.movement'].includes(e.type)).sort((a,b)=>b.at.localeCompare(a.at));
+function renderInvoices(){const p=parties(state.events),records=activeRecords(state.events).filter(e=>['invoice.create','receipt.create','payment.create','expense.create','journal.create','cash.movement'].includes(e.type)).sort((a,b)=>chronologicalOrder(b,a));
  $('content-page').innerHTML=`<div class="content-header"><div><h2>الفواتير والعمليات</h2><small>كل الحركات المسجلة في دفتر المحل</small></div><button class="fab" data-action="sales">+ فاتورة</button></div>
  <div class="filters"><select id="entry-filter"><option value="all">كل العمليات</option><option value="invoice.create">الفواتير</option><option value="receipt.create">القبض</option><option value="payment.create">الصرف</option><option value="expense.create">المصروفات</option><option value="journal.create">قيد بسيط</option><option value="cash.movement">حركة صندوق مباشرة</option></select></div>
  <div id="entries-list">${records.map(e=>invoiceCard(e,p)).join('')||'<div class="empty">لا توجد فواتير بعد</div>'}</div>`;
@@ -194,9 +196,9 @@ function openDailySales(selectedDate=localDate(),selectedCurrency=store().curren
  $('daily-pdf').disabled=$('daily-wa').disabled=!date;
  if(!date){$('daily-results').innerHTML='<p class="hint">اختر تاريخ التقرير</p>';return;}
  const sales=activeRecords(state.events).filter(e=>e.type==='invoice.create'&&e.payload.kind==='sale'&&dateOnly(e.at)===date&&(e.payload.currency||'YER')===currency&&(!partyId||e.payload.partyId===partyId));
- const sum=rounded(sales.reduce((a,e)=>a+e.payload.total,0),currency),paid=rounded(sales.reduce((a,e)=>a+(e.payload.paid??(e.payload.payment==='cash'?e.payload.total:0)),0),currency);
- $('daily-results').innerHTML=`<div class="summary-boxes"><div class="summary-box positive"><small>مبيعات ${date}</small><b>${money(sum,currency)}</b></div><div class="summary-box"><small>المحصل</small><b>${money(paid,currency)}</b></div><div class="summary-box"><small>الآجل</small><b>${money(rounded(sum-paid,currency),currency)}</b></div><div class="summary-box"><small>عدد الفواتير</small><b>${sales.length}</b></div></div><div class="list-card">${sales.map(e=>`<div class="data-row"><div><b>${esc(e.payload.invoiceNumber||e.id.slice(0,8))}</b><small style="display:block">${esc(getParty(e.payload.partyId)?.name||'عميل نقدي')}</small></div><strong>${money(e.payload.total,currency)}</strong></div>`).join('')||'<div class="empty">لا توجد مبيعات في هذا اليوم</div>'}</div>`;
- const info=store(),filename=`Qatfah-Sales-${date}-${currency}.pdf`,spec={title:'تقرير المبيعات اليومية',brand:info.name,logo:info.logo,address:info.address,contact:info.phone,currency,meta:[`التاريخ: ${date}`,`العملة: ${CURRENCIES[currency].label}`,`عدد الفواتير: ${sales.length}`,`الحساب: ${getParty(partyId)?.name||'جميع العملاء'}`],columns:['رقم الفاتورة','العميل','الإجمالي','المحصل'],rows:sales.map(e=>[e.payload.invoiceNumber||e.id.slice(0,8),getParty(e.payload.partyId)?.name||'نقدي',money(e.payload.total,currency),money(e.payload.paid??(e.payload.payment==='cash'?e.payload.total:0),currency)]),footer:`إجمالي مبيعات اليوم: ${money(sum,currency)} • الآجل: ${money(sum-paid,currency)}`};
+ const {total:sum,paid,due}=dailySalesFigures(sales,currency);
+ $('daily-results').innerHTML=`<div class="summary-boxes"><div class="summary-box positive"><small>مبيعات ${date}</small><b>${money(sum,currency)}</b></div><div class="summary-box"><small>المحصل</small><b>${money(paid,currency)}</b></div><div class="summary-box"><small>الآجل</small><b>${money(due,currency)}</b></div><div class="summary-box"><small>عدد الفواتير</small><b>${sales.length}</b></div></div><div class="list-card">${sales.map(e=>`<div class="data-row"><div><b>${esc(e.payload.invoiceNumber||e.id.slice(0,8))}</b><small style="display:block">${esc(getParty(e.payload.partyId)?.name||'عميل نقدي')}</small></div><strong>${money(e.payload.total,currency)}</strong></div>`).join('')||'<div class="empty">لا توجد مبيعات في هذا اليوم</div>'}</div>`;
+ const info=store(),filename=`Qatfah-Sales-${date}-${currency}.pdf`,spec={title:'تقرير المبيعات اليومية',brand:info.name,logo:info.logo,address:info.address,contact:info.phone,currency,meta:[`التاريخ: ${date}`,`العملة: ${CURRENCIES[currency].label}`,`عدد الفواتير: ${sales.length}`,`الحساب: ${getParty(partyId)?.name||'جميع العملاء'}`],columns:['رقم الفاتورة','العميل','الإجمالي','المحصل'],rows:sales.map(e=>[e.payload.invoiceNumber||e.id.slice(0,8),getParty(e.payload.partyId)?.name||'نقدي',money(e.payload.total,currency),money(e.payload.paid??(e.payload.payment==='cash'?e.payload.total:0),currency)]),footer:`إجمالي مبيعات اليوم: ${money(sum,currency)} • الآجل: ${money(due,currency)}`};
  $('daily-pdf').onclick=async()=>{try{await sharePdf(await makePdf(spec),filename);}catch(err){toast(err.message);}};
  $('daily-wa').onclick=()=>withWhatsappButton($('daily-wa'),async()=>{const phone=normalizeYemenPhone($('daily-recipient-phone').value);return sendPdfToWhatsapp(phone,await makePdf(spec),filename,`تقرير مبيعات ${date} من ${info.name} • ${currency}`);});
  };bindRecipientFields('daily');$('daily-date').onchange=show;$('daily-currency').onchange=show;$('daily-party').onchange=show;$('daily-add-sale').onclick=()=>{const date=$('daily-date').value,currency=$('daily-currency').value,partyId=$('daily-party').value;openInvoice('sale','',{partyId,currency,back:()=>openDailySales(date,currency,partyId)});};show();
@@ -207,17 +209,19 @@ function itemRow(item={}){
  return `<article class="invoice-line-card item-entry">
  <label class="floating-label">الصنف أو الخدمة<input class="item-title" type="text" list="qatfah-products" required maxlength="110" placeholder="اختر من الأصناف أو اكتب صنفًا جديدًا" value="${esc(item.title||'')}" autocomplete="off"/></label>
  <div class="item-fields"><button class="remove-item" type="button" aria-label="حذف البند" title="حذف البند">♲</button><label class="floating-label">السعر<input class="item-price" type="number" min="0" max="1000000000000" step="0.01" value="${Number(item.price||0)}" required/></label><label class="floating-label">الكمية<input class="item-qty" type="number" min="0.001" max="1000000" step="0.001" value="${Number(item.qty||1)}" required/></label></div>
- <p class="line-total">الإجمالي: <strong>${money(rounded((item.qty||1)*(item.price||0),currency),currency)}</strong></p>
+ <p class="line-total">الإجمالي: <strong>${money(invoiceLineAmount(item.qty||1,item.price||0,currency),currency)}</strong></p>
  </article>`;
 }
 function invoiceTotal(){
  const currency=$('invoice-currency')?.value||'YER',rows=[...$('items-container').querySelectorAll('.item-entry')];
- const sum=rounded(rows.reduce((n,r)=>n+(Number(r.querySelector('.item-qty').value)||0)*(Number(r.querySelector('.item-price').value)||0),0),currency);
- const paid=Number($('invoice-paid')?.value)||0;
- $('invoice-total').textContent=money(sum,currency);
- $('invoice-outstanding').textContent=money(rounded(sum-paid,currency),currency);
+ const goods=rows.map(r=>({qty:Number(r.querySelector('.item-qty').value),price:Number(r.querySelector('.item-price').value)}));
+ let sum,paid,due;
+ try{sum=invoiceItemsTotal(goods,currency);paid=rounded(Number($('invoice-paid')?.value)||0,currency);due=fromMinor(toMinor(sum,currency)-toMinor(paid,currency),currency);}
+ catch{sum=NaN;paid=0;due=NaN;}
+ $('invoice-total').textContent=Number.isFinite(sum)?money(sum,currency):'راجع الكمية والسعر';
+ $('invoice-outstanding').textContent=Number.isFinite(due)?money(due,currency):'—';
  $('invoice-outstanding').classList.toggle('debt',sum>paid);
- for(const row of rows){const q=Number(row.querySelector('.item-qty').value)||0,p=Number(row.querySelector('.item-price').value)||0;row.querySelector('.line-total strong').textContent=money(rounded(q*p,currency),currency);}
+ rows.forEach((row,i)=>{let label='—';try{label=money(invoiceLineAmount(goods[i].qty,goods[i].price,currency),currency);}catch{}row.querySelector('.line-total strong').textContent=label;});
  return {total:sum,paid};
 }
 function catalogFill(row){
@@ -227,7 +231,7 @@ function catalogFill(row){
  else delete row.dataset.itemId;
  invoiceTotal();
 }
-function invoiceNumber(kind){const num=activeRecords(state.events).filter(e=>e.type==='invoice.create'&&e.payload.kind===kind).length+1;return `${kind==='sale'?'INV':'PUR'}-${localDate().replaceAll('-','')}-${String(num).padStart(4,'0')}`;}
+function invoiceNumber(kind){return nextInvoiceNumber(state.events,kind,localDate());}
 function openInvoice(kind='sale',editId='',options={}){
  const previous=editId?activeRecords(state.events).find(e=>e.id===editId&&e.type==='invoice.create'):null;
  const data=previous?.payload||{partyId:options.partyId||'',currency:options.currency||store().currency||'YER'},currency=data.currency||store().currency||'YER',people=parties(state.events),catalog=itemsCatalog(state.events);
@@ -276,14 +280,15 @@ function openInvoice(kind='sale',editId='',options={}){
  $('invoice-form').onsubmit=async ev=>{ev.preventDefault();if(savingInvoice)return;const form=ev.target,f=new FormData(form),partyId=String(f.get('partyId')||''),curr=String(f.get('currency'));
   const goods=[...entries.children].map(row=>({title:row.querySelector('.item-title').value.trim(),qty:Number(row.querySelector('.item-qty').value),price:rounded(Number(row.querySelector('.item-price').value),curr),itemId:row.dataset.itemId||''}));
   if(!CURRENCIES[curr]||goods.some(i=>!i.title||!Number.isFinite(i.qty)||i.qty<=0||!Number.isFinite(i.price)||i.price<0))return toast('تحقق من الأصناف والكمية والسعر');
-  const total=rounded(goods.reduce((n,i)=>n+i.qty*i.price,0),curr),paid=rounded(Number(f.get('paid')),curr);
+  let total;try{total=invoiceItemsTotal(goods,curr);}catch(error){return toast(error.message);}
+  const paid=rounded(Number(f.get('paid')),curr);
   if(!(total>0)||!Number.isFinite(total)||!Number.isFinite(paid)||paid<0||paid>total||total>1e12)return toast('المبلغ المدفوع يجب ألا يتجاوز إجمالي الفاتورة');
   if(paid<total&&!partyId)return toast('اختر عميلًا أو موردًا إذا كان هناك مبلغ آجل');
   const batch=[],catalogByName=new Map(itemsCatalog(state.events).map(item=>[item.name,item]));
   for(const item of goods){let known=catalogByName.get(item.title);if(!known){
     known={id:crypto.randomUUID(),name:item.title,unit:'وحدة',barcode:'',prices:{[curr]:item.price},createdFromInvoice:true};batch.push({type:'item.add',payload:known});catalogByName.set(item.title,known);
   }item.itemId=known.id;}
-  const payload={kind,payment:paid>=total?'cash':'credit',partyId,items:goods,total,paid,currency:curr,invoiceNumber:data.invoiceNumber||invoiceNumber(kind),notes:String(f.get('notes')||'').trim(),replaces:previous?.id||''};
+  const payload={kind,payment:paid>=total?'cash':'credit',partyId,items:goods,total,paid,currency:curr,roundingMode:'per_line',invoiceNumber:data.invoiceNumber||invoiceNumber(kind),notes:String(f.get('notes')||'').trim(),replaces:previous?.id||''};
   batch.push(...invoiceEventEntries(payload,previous));
   const button=form.querySelector('[type="submit"]');savingInvoice=true;button.disabled=true;
   try{const saved=await recordBatch(batch);if(form.isConnected){closeSheet();openEvent(saved.at(-1).id,options.back);}}
@@ -309,7 +314,15 @@ function openMoney(kind='receipt',initialParty=''){
  const title=kind==='receipt'?'سند قبض':kind==='payment'?'سند صرف':'مصروف يومي';const type=kind==='receipt'?'receipt.create':kind==='payment'?'payment.create':'expense.create';
  const partyField=kind!=='expense'?`<label>الحساب<select name="partyId" data-live-parties required><option value="">اختر العميل أو المورد</option>${partyOptions(initialParty)}</select></label>`:`<label>نوع المصروف<input name="category" maxlength="100" required placeholder="إيجار / نقل / عمالة"/></label>`;
  showSheet(title,`<form id="money-form" class="sheet-form">${partyField}<label>العملة<select name="currency">${Object.entries(CURRENCIES).map(([k,c])=>`<option value="${k}" ${k===(store().currency||'YER')?'selected':''}>${esc(c.label)} (${k})</option>`).join('')}</select></label><label>المبلغ<input type="number" name="amount" required min="0.01" max="1000000000000" step="0.01" placeholder="0"/></label><label>البيان<textarea name="notes" maxlength="600" placeholder="تفاصيل العملية"></textarea></label><button type="submit" class="btn btn-primary">حفظ ${title}</button></form>`);
- $('money-form').onsubmit=async ev=>{ev.preventDefault();const f=new FormData(ev.target),currency=f.get('currency'),amount=rounded(f.get('amount'),currency);if(!CURRENCIES[currency]||amount<=0||amount>1e12||!Number.isFinite(amount))return toast('أدخل مبلغًا صحيحًا');await record(type,{partyId:f.get('partyId')||'',category:f.get('category')||'',notes:String(f.get('notes')||''),amount,currency});closeSheet();};
+ let saving=false;
+ $('money-form').onsubmit=async ev=>{
+  ev.preventDefault();if(saving)return;const form=ev.target,f=new FormData(form),currency=f.get('currency'),amount=rounded(f.get('amount'),currency);
+  if(!CURRENCIES[currency]||amount<=0||amount>1e12||!Number.isFinite(amount))return toast('أدخل مبلغًا صحيحًا');
+  const button=form.querySelector('[type="submit"]');saving=true;button.disabled=true;
+  try{await record(type,{partyId:f.get('partyId')||'',category:f.get('category')||'',notes:String(f.get('notes')||''),amount,currency});if(form.isConnected)closeSheet();}
+  catch(error){toast('لم تُحفظ الحركة: '+error.message);}
+  finally{saving=false;if(button.isConnected)button.disabled=false;}
+ };
 }
 
 const openMoneyServices=createMoneyDesk({events:()=>state.events,record,showSheet:(...a)=>showSheet(...a),closeSheet:()=>closeSheet(),toast:(...a)=>toast(...a),store:()=>store(),makePdf,sharePdf});
@@ -327,7 +340,7 @@ function bindRecipientFields(prefix){
  if(select)select.onchange=()=>{const party=getParty(select.value);try{input.value=party?.phone?normalizeYemenPhone(party.phone).slice(3):'';}catch{input.value='';}};
 }
 function renderSimpleJournal(){
- const currency=store().currency||'YER',recent=activeRecords(state.events).filter(e=>e.type==='journal.create').sort((a,b)=>b.at.localeCompare(a.at)).slice(0,15);
+ const currency=store().currency||'YER',recent=activeRecords(state.events).filter(e=>e.type==='journal.create').sort((a,b)=>chronologicalOrder(b,a)).slice(0,15);
  $('content-page').innerHTML=`<div class="content-header"><div><h2>قيد بسيط</h2><small>تسجيل دين أو تسديد أو تحويل بين الحسابات</small></div><button class="text-button" data-action="cashbook">حركة الصندوق ←</button></div>
  <form id="journal-form" class="flat-card sheet-form journal-form">
  <div class="invoice-field-pair"><label id="journal-party-label">الحساب<select id="journal-party" name="partyId" data-live-parties required><option value="">اختر الحساب</option>${partyOptions()}</select></label><button type="button" class="small-add" id="journal-add-party" aria-label="إضافة حساب فوري">＋</button></div>
@@ -417,7 +430,7 @@ function openStatement(partyId=''){
 }
 function openEvent(id,backAction=null){
  const e=activeRecords(state.events).find(x=>x.id===id);if(!e)return toast('العملية غير موجودة');const d=describeEvent(e,parties(state.events)),p=e.payload,person=getParty(p.partyId),currency=p.currency||'YER';
- showSheet(`تفاصيل ${d.title}`,`<section class="flat-card"><div class="row-between"><b>${esc(d.title)}</b><span class="chip">${dateOnly(e.at)}</span></div><div class="data-row"><span>رقم المستند</span><strong dir="ltr">${esc(p.invoiceNumber||e.id.slice(0,12))}</strong></div><div class="data-row"><span>الجهة</span><b>${esc(person?.name||p.category||'نقدي')}</b></div>${e.type==='invoice.create'?`<div class="data-row"><span>الدفع</span><b>${p.payment==='cash'?'نقدي':'آجل / جزئي'}</b></div>${p.items.map(x=>`<div class="data-row"><span>${esc(x.title)} × ${x.qty}</span><b>${money(rounded(x.qty*x.price,currency),currency)}</b></div>`).join('')}<div class="data-row"><span>المدفوع</span><b>${money(p.paid??(p.payment==='cash'?p.total:0),currency)}</b></div><div class="data-row"><span>المتبقي</span><b>${money(p.total-(p.paid??(p.payment==='cash'?p.total:0)),currency)}</b></div>`:''}<div class="data-row"><b>الإجمالي</b><strong>${money(d.amount,currency)}</strong></div>${p.notes?`<p class="hint">${esc(p.notes)}</p>`:''}
+ showSheet(`تفاصيل ${d.title}`,`<section class="flat-card"><div class="row-between"><b>${esc(d.title)}</b><span class="chip">${dateOnly(e.at)}</span></div><div class="data-row"><span>رقم المستند</span><strong dir="ltr">${esc(p.invoiceNumber||e.id.slice(0,12))}</strong></div><div class="data-row"><span>الجهة</span><b>${esc(person?.name||p.category||'نقدي')}</b></div>${e.type==='invoice.create'?`<div class="data-row"><span>الدفع</span><b>${p.payment==='cash'?'نقدي':'آجل / جزئي'}</b></div>${p.items.map(x=>`<div class="data-row"><span>${esc(x.title)} × ${x.qty}</span><b>${money(p.roundingMode==='per_line'?invoiceLineAmount(x.qty,x.price,currency):rounded(x.qty*x.price,currency),currency)}</b></div>`).join('')}<div class="data-row"><span>المدفوع</span><b>${money(p.paid??(p.payment==='cash'?p.total:0),currency)}</b></div><div class="data-row"><span>المتبقي</span><b>${money(p.total-(p.paid??(p.payment==='cash'?p.total:0)),currency)}</b></div>`:''}<div class="data-row"><b>الإجمالي</b><strong>${money(d.amount,currency)}</strong></div>${p.notes?`<p class="hint">${esc(p.notes)}</p>`:''}
  <div class="foot-actions"><button class="btn btn-primary" id="detail-pdf">▤ طباعة / PDF</button><button class="btn btn-light" id="detail-wa">إرسال PDF واتساب</button>${e.type==='invoice.create'?'<button class="btn btn-light" id="detail-edit">✎ تعديل الفاتورة</button>':''}</div></section>`);
  $('detail-pdf').onclick=async()=>{try{const doc=await makeEventDocument(e,state.events,store());await sharePdf(doc.blob,doc.filename);}catch(err){toast('تعذر إنشاء المستند: '+err.message);}};
  $('detail-wa').onclick=()=>sendEventWhatsapp(e,$('detail-wa'));

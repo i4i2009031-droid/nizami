@@ -1,5 +1,5 @@
 /** Pure, deterministic accounting projections. Never combine different currencies. */
-import {CURRENCIES,currencyOf,rounded,dateOnly,activeRecords,toMinor,fromMinor,addUnits,signedMinor} from './accounting-primitives.js';
+import {CURRENCIES,currencyOf,rounded,dateOnly,activeRecords,toMinor,fromMinor,addUnits,signedMinor,chronologicalOrder} from './accounting-primitives.js';
 import {cashbook,financialPostings,validateSimpleJournal,validateCashMovement} from './money-services.js';
 export {CURRENCIES,currencyOf,rounded,dateOnly,activeRecords} from './accounting-primitives.js';
 export function money(n,currency='YER'){const c=CURRENCIES[currency]||CURRENCIES.YER;return `${new Intl.NumberFormat('en-US',{minimumFractionDigits:c.digits,maximumFractionDigits:c.digits}).format(Number(n)||0)} ${c.symbol}`;}
@@ -40,7 +40,7 @@ export function linesForParty(events,partyId,currency='YER'){
   }
   if(title&&(change!==0||e.type==='invoice.create')){const value=rounded(change,currency);out.push({id:e.id,at:e.at,title,change:value,amount:Math.abs(value),currency,notes:p.notes||'',...(isTransfer?{counterpartyId:p.fromPartyId===partyId?p.toPartyId:p.fromPartyId}:{})});}
  }
- return out.sort((a,b)=>a.at.localeCompare(b.at)||a.id.localeCompare(b.id));
+ return out.sort(chronologicalOrder);
 }
 /** Positive => customer owes shop (عليه). Negative => shop owes customer (له). */
 export function statement(events,partyId,from='0000-01-01',to='9999-12-31',currency='YER'){

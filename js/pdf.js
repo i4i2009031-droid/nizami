@@ -1,5 +1,6 @@
 /** Offline-first Arabic PDF rendering (canvas rasterization + embedded JPEG, no CDN). */
 import {dateOnly} from './accounting-primitives.js';
+import {invoiceLineAmount} from './invoice-math.js';
 const enc=new TextEncoder();
 const ltr=value=>'\u2066'+String(value??'')+'\u2069';
 const appendAll=arrays=>{const n=arrays.reduce((s,a)=>s+a.length,0),out=new Uint8Array(n);let p=0;for(const a of arrays){out.set(a,p);p+=a.length;}return out;};
@@ -74,14 +75,15 @@ export async function makeInvoicePdf({event,brandInfo={},party={},balanceText=''
    text(c,item.title||item.name||'',1290,y+33,21,'#26394c',false,'right',610);
    text(c,item.qty,620,y+33,19,'#26394c');
    text(c,m(item.price,currency),408,y+33,19,'#26394c');
-   text(c,m((Number(item.qty)||0)*(Number(item.price)||0),currency),180,y+33,20,'#132b46',true);
+   const lineAmount=p.roundingMode==='per_line'?invoiceLineAmount(item.qty,item.price,currency):(Number(item.qty)||0)*(Number(item.price)||0);
+   text(c,m(lineAmount,currency),180,y+33,20,'#132b46',true);
   });
   c.strokeStyle='#b0bdca';c.strokeRect(40,298,1400,530);
   if(page===chunks.length-1){
    const paid=Number(p.paid??(p.payment==='cash'?p.total:0)),left=Math.max(0,p.total-paid);
    const y=846;const labels=[['الإجمالي',p.total],['المدفوع',paid],['المتبقي',left]];
    labels.forEach(([label,val],i)=>{let x=40+i*225;c.fillStyle=i===2?'#e9f3f7':'#f8fafc';c.fillRect(x,y,213,66);c.strokeStyle='#ccd7e0';c.strokeRect(x,y,213,66);text(c,label,x+201,y+22,15,'#687588');text(c,m(val,currency),x+201,y+51,20,'#132b46',true);});
-   text(c,`العميل: ${party.name||'عميل نقدي'}`,1406,865,21,'#162a40',true);
+   text(c,`${p.kind==='purchase'?'المورد':'العميل'}: ${party.name||(p.kind==='purchase'?'مورد نقدي':'عميل نقدي')}`,1406,865,21,'#162a40',true);
    text(c,`ملاحظات: ${p.notes||'—'}`,1406,896,16,'#48566a',false,'right',665);
    if(balanceText)text(c,`رصيد الحساب: ${balanceText}`,1406,932,18,'#162a40',true,'right',1360);
   }else text(c,'يتبع في الصفحة التالية ...',1405,890,18,'#677383');
