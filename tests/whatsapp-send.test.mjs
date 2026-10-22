@@ -3,396 +3,168 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
+// Adapter contract tests. WA-JS and its network response are simulated; these
+// tests deliberately do not claim that a real WhatsApp recipient received data.
 const source=fs.readFileSync(new URL('../native/android/whatsapp-direct.js',import.meta.url),'utf8');
-const PHONE='967782843242';
-const CAPTION='كشف الحساب التجريبي';
-const PDF='%PDF-1.4\n%test fixture only\n%%EOF';
-
-class Element {
-  constructor(tag='DIV',attrs={},value=''){
-    this.tagName=tag;this.attrs=attrs;this.textContent=value;this.map=new Map();this.events=[];this.clicks=0;
-    this.hidden=false;this.disabled=false;this.parent=null;this.onClick=null;this.onEvent=null;
-  }
-  get innerText(){return this.textContent;}
-  getAttribute(name){return this.attrs[name]??null;}
-  contains(node){for(let p=node;p;p=p.parent)if(p===this)return true;return false;}
-  getClientRects(){return this.hidden?[]:[{}];}
-  querySelectorAll(selector){return this.map.get(selector)||[];}
-  querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
-  closest(selector){
-    if(selector==='footer')return this.footer||null;
-    if(selector==='button,[role="button"]')return this.tagName==='BUTTON'?this:this.parent;
-    return null;
-  }
-  focus(){if(this.onFocus)this.onFocus();}
-  dispatchEvent(event){this.events.push(event.type);if(this.onEvent)this.onEvent(event);return true;}
-  click(){this.clicks++;if(this.onClick)this.onClick();}
-  set(selector,items){this.map.set(selector,items);return this;}
+const PHONE='967782843242', JID=PHONE+'@c.us';
+const PDF='%PDF-1.4\n% transport contract fixture\n%%EOF';
+const BASE64=Buffer.from(PDF).toString('base64');
+const flush=()=>new Promise(resolve=>setImmediate(resolve));
+function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};}
+function harness({phone=PHONE,online=true,authenticated=true,ready=true,contact,send,result,version='4.7.1'}={}){
+ let now=1000,nextTimer=0;
+ const timers=new Map(),calls=[],forbidden=[];
+ const no=name=>()=>{forbidden.push(name);throw Error('Forbidden visible side effect: '+name);};
+ const wpp={version,isReady:ready,loader:{isReady:ready},
+  conn:{isAuthenticated:()=>authenticated,isMainReady:()=>ready,isOnline:()=>online},
+  contact:{queryWidExists:async jid=>{calls.push({kind:'query',jid});return contact===undefined?{wid:jid}:typeof contact==='function'?contact(jid):contact;}},
+  chat:{sendFileMessage:async(jid,content,options)=>{calls.push({kind:'file',jid,content,options});return send?send():result??{id:`true_${jid}_FILE1`,ack:1,sendMsgResult:{messageSendResult:'OK'}};},
+   sendTextMessage:async(jid,content,options)=>{calls.push({kind:'text',jid,content,options});return send?send():result??{id:`true_${jid}_TEXT1`,ack:1,sendMsgResult:{messageSendResult:'OK'}};}}
+ };
+ const window={WPP:wpp,open:no('window.open'),alert:no('alert'),confirm:no('confirm')};
+ const context={window,navigator:{onLine:online,share:no('navigator.share')},
+  document:new Proxy({}, {get(_target,key){return no('document.'+String(key))();}}),
+  location:new Proxy({}, {get(_target,key){return no('location.'+String(key))();},set(){no('navigation')();return false;}}),
+  atob:s=>Buffer.from(s,'base64').toString('binary'),Date:{now:()=>now},
+  setTimeout(fn,delay){const id=++nextTimer;timers.set(id,{fn,due:now+delay});return id;},clearTimeout:id=>timers.delete(id)};
+ assert.equal(vm.runInNewContext(source,context),true);
+ const driver=window.__qatfahDirect;
+ async function tick(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.due<=now){timers.delete(id);timer.fn();}await flush();}
+ function prepare(options={}){return driver.prepare({requestId:'request-1',phone,caption:'تفاصيل الفاتورة',filename:'فاتورة_قطفة.pdf',isPdf:true,...options});}
+ async function start(options={}){assert.equal(prepare(options),true);if(options.isPdf!==false)assert.equal(driver.addChunk(BASE64),true);assert.equal(driver.start(),true);await flush();}
+ return {driver,wpp,calls,forbidden,timers,context,prepare,start,tick,status:()=>JSON.parse(driver.status())};
 }
 
-function harness({phone=PHONE,linked=true,pdf=false,caption=CAPTION}={}){
-  let now=1000,nextTimer=1,focused=null;
-  const timers=new Map(),root=new Element(),head=new Element('HEADER',{},phone),title=new Element('SPAN',{title:phone});
-  const field=new Element('DIV',{},''),footer=new Element('FOOTER'),send=new Element('BUTTON',{'aria-label':'Send'});
-  const file=new Element('INPUT',{type:'file',accept:'application/pdf'}),preview=new Element('DIV',{},'Invoice.pdf');
-  const previewCaption=new Element('DIV'),previewSend=new Element('BUTTON',{'aria-label':'Send'});
-  const doc=new Element('DOCUMENT'),qr=new Element('CANVAS');
-  let messages=[],previewVisible=false,fileInputs=pdf?[file]:[];
-  head.set('[title]',[title]);field.footer=footer;send.footer=footer;
-  file.parent=root;head.parent=root;title.parent=head;field.parent=footer;footer.parent=root;
-  previewCaption.parent=preview;previewSend.parent=preview;
-  field.onFocus=()=>{focused=field;};previewCaption.onFocus=()=>{focused=previewCaption;};
-  root.set('header,[data-testid="conversation-header"]',[head]);
-  root.set('footer [contenteditable="true"][role="textbox"]',linked?[field]:[]);
-  footer.set('button[aria-label="Send"]',[send]);
-  preview.set('[contenteditable="true"][role="textbox"]',[previewCaption]);
-  preview.set('button[aria-label="Send"]',[previewSend]);
-  const oldRootQuery=root.querySelectorAll.bind(root);
-  root.querySelectorAll=selector=>{
-    if(selector==='[data-id]')return messages;
-    if(selector==='[data-id^="true_"]')return messages.filter(x=>x.getAttribute('data-id')?.startsWith('true_'));
-    return oldRootQuery(selector);
-  };
-  const oldDocQuery=doc.querySelectorAll.bind(doc);
-  doc.querySelectorAll=selector=>{
-    if(selector==='#main,[data-testid="conversation-panel-wrapper"]')return linked?[root]:[];
-    if(selector==='input[type="file"]')return fileInputs;
-    if(selector==='[role="dialog"],[data-testid*="preview"],[data-testid*="media-editor"]')return previewVisible?[preview]:[];
-    if(selector==='[data-testid*="qr"] canvas')return linked?[]:[qr];
-    return oldDocQuery(selector);
-  };
-  doc.execCommand=(_cmd,_ui,value)=>{if(focused)focused.textContent=value;return true;};
-  file.onEvent=event=>{if(event.type==='change')previewVisible=true;};
-  class FileFixture{constructor(parts,name,options){this.parts=parts;this.name=name;this.type=options.type;}}
-  class Transfer{constructor(){this.files=[];this.items={add:file=>this.files.push(file)};}}
-  class EventFixture{constructor(type,options){this.type=type;Object.assign(this,options);}}
-  const context={window:{},document:doc,getComputedStyle:()=>({visibility:'visible'}),
-    Date:{now:()=>now},Set,Uint8Array,File:FileFixture,DataTransfer:Transfer,
-    Event:EventFixture,InputEvent:EventFixture,atob:value=>Buffer.from(value,'base64').toString('binary'),
-    setInterval:callback=>{const id=nextTimer++;timers.set(id,callback);return id;},
-    clearInterval:id=>timers.delete(id)};
-  vm.runInNewContext(source,context);
-  const driver=context.window.__qatfahDirect;
-  function tick(count=1,ms=450){for(let i=0;i<count;i++){now+=ms;for(const callback of [...timers.values()])callback();}}
-  function outgoing(id,{phone=PHONE,body=caption,ack=true}={}){
-    const node=new Element('DIV',{'data-id':`true_${phone}@c.us_${id}`},body);
-    if(ack)node.set('[data-icon="msg-check"],[data-icon="msg-dblcheck"],[data-testid="msg-check"],[data-testid="msg-dblcheck"]',[new Element()]);
-    messages.push(node);return node;
-  }
-  function start(opts={}){
-    assert.equal(driver.prepare({phone:PHONE,caption,filename:'Invoice.pdf',isPdf:pdf,...opts}),true);
-    if(pdf)assert.equal(driver.addChunk(Buffer.from(PDF).toString('base64')),true);
-    assert.equal(driver.start(),true);return driver;
-  }
-  return {driver,start,tick,outgoing,timers,field,send,preview,previewCaption,previewSend,file,title,doc,root,head,
-    status:()=>JSON.parse(driver.status()),setPreview:visible=>{previewVisible=visible;},
-    replaceMessages:items=>{messages=items;},setFileInputs:items=>{fileInputs=items;},context};
-}
-
-test('unlinked session terminates before dispatch and unlocks a later explicit attempt',()=>{
-  const h=harness({linked:false});h.start();
-  assert.equal(h.status().phase,'not_linked');assert.equal(h.status().safeToFallback,true);
-  assert.equal(h.status().dispatched,false);assert.equal(h.timers.size,0);
-  assert.equal(h.driver.prepare({phone:PHONE,caption:'next'}),true);
-  assert.equal(h.driver.cancel(),true);assert.equal(h.timers.size,0);
+for(let cycle=1;cycle<=5;cycle++)test(`silent document contract cycle ${cycle}: one exact recipient, identical PDF/caption, ack1 and zero UI calls`,async()=>{
+ const phone='96777'+String(1000000+cycle),caption='سند تجربة '+cycle;
+ const h=harness({phone});await h.start({requestId:'cycle-'+cycle,caption});
+ const sends=h.calls.filter(x=>x.kind==='file');assert.equal(sends.length,1);
+ assert.equal(sends[0].jid,phone+'@c.us');assert.equal(sends[0].content,'data:application/pdf;base64,'+BASE64);
+ assert.deepEqual(JSON.parse(JSON.stringify(sends[0].options)),{waitForAck:true,markIsRead:false,detectMentioned:false,type:'document',mimetype:'application/pdf',filename:'فاتورة_قطفة.pdf',caption});
+ assert.equal(h.status().submitted,true);assert.equal(h.status().ack,1);assert.equal(h.status().delivered,false);
+ assert.equal(h.status().deliveryConfirmed,false);assert.equal(h.status().safeToFallback,false);
+ assert.equal(h.status().messageId,`true_${phone}@c.us_FILE1`);assert.equal(h.status().requestId,'cycle-'+cycle);
+ assert.equal(h.timers.size,0);assert.deepEqual(h.forbidden,[]);
 });
 
-test('text sends one activation and needs a new matching acknowledged outgoing message',()=>{
-  const h=harness();h.start();h.tick();
-  assert.equal(h.send.clicks,1);assert.equal(h.status().phase,'verifying');
-  assert.equal(h.status().submitted,false);assert.equal(h.status().safeToFallback,false);
-  h.outgoing('NEW');h.tick();
-  assert.equal(h.status().phase,'submitted');assert.equal(h.status().dispatched,true);
-  assert.equal(h.status().deliveryConfirmed,false);assert.equal(h.timers.size,0);
-  h.tick(100);assert.equal(h.send.clicks,1);
+test('ack2 denotes recipient delivery, whereas ack1 denotes server acceptance',async()=>{
+ const h=harness({result:{id:`true_${JID}_A2`,ack:2}});await h.start();
+ assert.equal(h.status().submitted,true);assert.equal(h.status().delivered,true);assert.equal(h.status().deliveryConfirmed,true);
 });
 
-test('old matching messages and unrelated outgoing activity cannot confirm this send',()=>{
-  const h=harness();h.outgoing('OLD');h.start();h.tick();
-  h.outgoing('OTHER',{phone:'967700000001'});h.outgoing('DIFFERENT',{body:'رسالة أخرى'});h.tick();
-  assert.equal(h.status().phase,'verifying');h.tick(1,15000);
-  assert.equal(h.status().phase,'uncertain');assert.equal(h.status().safeToFallback,false);
-  assert.equal(h.send.clicks,1);assert.equal(h.timers.size,0);
+test('text uses the same verified JID and acknowledgement contract without file UI',async()=>{
+ const h=harness();await h.start({isPdf:false,caption:'إشعار قطفة'});
+ assert.equal(h.calls.filter(x=>x.kind==='text').length,1);assert.equal(h.calls.filter(x=>x.kind==='file').length,0);
+ assert.equal(h.status().submitted,true);assert.deepEqual(h.forbidden,[]);
 });
 
-test('a new matching bubble without an acknowledgement is not reported as sent',()=>{
-  const h=harness();h.start();h.tick();h.outgoing('QUEUED',{ack:false});h.tick(1,15000);
-  assert.equal(h.status().phase,'uncertain');assert.equal(h.status().submitted,false);
-  assert.equal(h.status().deliveryConfirmed,false);assert.equal(h.send.clicks,1);
+for(const [label,options,code] of [
+ ['missing authentication',{authenticated:false},'session_not_authenticated'],
+ ['offline connection',{online:false},'offline'],
+ ['incompatible bundle',{version:'0.0.0'},'wpp_version_mismatch'],
+ ['unknown customer',{contact:null},'recipient_not_registered'],
+ ['different canonical phone',{contact:{wid:'967700000001@c.us'}},'recipient_mismatch']
+])test(`${label} fails before dispatch and never opens another UI`,async()=>{
+ const h=harness(options);await h.start();
+ assert.equal(h.status().code,code);assert.equal(h.status().dispatched,false);assert.equal(h.status().submitted,false);
+ assert.equal(h.calls.filter(x=>x.kind==='file').length,0);assert.equal(h.status().safeToFallback,false);assert.deepEqual(h.forbidden,[]);
 });
 
-test('the PDF is attached with a single change event and sent with its caption once',()=>{
-  const h=harness({pdf:true});h.start();h.tick();
-  assert.deepEqual(h.file.events,['change']);assert.equal(h.file.files.length,1);
-  assert.equal(h.file.files[0].type,'application/pdf');assert.equal(h.file.files[0].name,'Invoice.pdf');
-  h.tick();assert.equal(h.previewSend.clicks,1);assert.equal(h.send.clicks,0);
-  assert.equal(h.previewCaption.textContent,CAPTION);
-  h.outgoing('PDF',{body:'Invoice.pdf '+CAPTION});h.tick();
-  assert.equal(h.status().phase,'submitted');assert.equal(h.status().deliveryConfirmed,false);
-  h.tick(100);assert.equal(h.previewSend.clicks,1);assert.deepEqual(h.file.events,['change']);
+test('missing WA-JS APIs produce a pre-dispatch error, never an invented Store call',async()=>{
+ const h=harness();delete h.wpp.chat.sendFileMessage;await h.start();
+ assert.equal(h.status().code,'wpp_api_unavailable');assert.equal(h.status().dispatched,false);assert.deepEqual(h.forbidden,[]);
 });
 
-test('a filename in an old conversation is not treated as a new PDF upload preview',()=>{
-  const h=harness({pdf:true});h.outgoing('OLD',{body:'Invoice.pdf '+CAPTION});
-  h.file.onEvent=()=>{};h.start();h.tick(57);
-  assert.equal(h.status().phase,'error');assert.equal(h.previewSend.clicks,0);assert.equal(h.send.clicks,0);
-  assert.equal(h.status().safeToFallback,false);assert.equal(h.timers.size,0);
+test('unready engine times out without navigating or dispatching',async()=>{
+ const h=harness({ready:false});await h.start();await h.tick(16000);
+ assert.equal(h.status().code,'wpp_not_ready');assert.equal(h.status().dispatched,false);assert.equal(h.timers.size,0);
 });
 
-test('invalid PDF data fails before touching a file input or dispatching',()=>{
-  const h=harness({pdf:true});
-  assert.equal(h.driver.prepare({phone:PHONE,caption:CAPTION,filename:'Invoice.pdf',isPdf:true}),true);
-  h.driver.addChunk(Buffer.from('not a PDF').toString('base64'));h.driver.start();h.tick();
-  assert.equal(h.status().phase,'error');assert.equal(h.status().safeToFallback,true);
-  assert.equal(h.previewSend.clicks,0);assert.deepEqual(h.file.events,[]);assert.equal(h.timers.size,0);
+test('engine readiness may arrive asynchronously without destroying the session',async()=>{
+ const h=harness({ready:false});await h.start();h.wpp.isReady=true;h.wpp.conn.isMainReady=()=>true;
+ await h.tick(200);assert.equal(h.status().submitted,true);assert.deepEqual(h.forbidden,[]);
 });
 
-test('existing text drafts remain intact and no send activation occurs',()=>{
-  const h=harness();h.field.textContent='مسودة المستخدم';h.start();h.tick();
-  assert.equal(h.field.textContent,'مسودة المستخدم');assert.equal(h.send.clicks,0);
-  assert.equal(h.status().phase,'error');assert.equal(h.status().dispatched,false);assert.equal(h.status().safeToFallback,false);
+test('recipient LID is accepted only when the preflight explicitly mapped the exact requested phone',async()=>{
+ const h=harness({contact:{wid:JID,lid:'123456789@lid'},result:{id:'true_123456789@lid_LID1',to:'123456789@lid',ack:1}});
+ await h.start();assert.equal(h.status().submitted,true);assert.equal(h.calls.find(x=>x.kind==='file').jid,JID);
 });
 
-test('a recipient change after chat preparation stops dispatch',()=>{
-  const h=harness();h.start();h.title.attrs.title='967711111111';h.tick();
-  assert.equal(h.send.clicks,0);assert.equal(h.status().phase,'error');
-  assert.equal(h.status().dispatched,false);
+for(const [label,result,code] of [
+ ['no response',{},'ack_id_missing'],
+ ['missing message id',{ack:1},'ack_id_missing'],
+ ['queued without ack',{id:`true_${JID}_A0`,ack:0},'ack_not_confirmed'],
+ ['negative ack',{id:`true_${JID}_ERR`,ack:-1},'ack_not_confirmed'],
+ ['invalid ack',{id:`true_${JID}_ERR`,ack:9},'ack_not_confirmed'],
+ ['other recipient',{id:'true_967700000001@c.us_WRONG',ack:1},'ack_recipient_mismatch'],
+ ['unmapped LID',{id:'true_999999999@lid_WRONG',ack:1},'ack_recipient_mismatch'],
+ ['conflicting to field',{id:`true_${JID}_RIGHT`,to:'967700000001@c.us',ack:1},'ack_recipient_mismatch'],
+ ['opaque id',{id:'opaque',ack:1},'ack_recipient_mismatch']
+])test(`${label} is uncertain, not success, and causes no retry`,async()=>{
+ const h=harness({result});await h.start();assert.equal(h.status().phase,'uncertain');assert.equal(h.status().code,code);
+ assert.equal(h.status().submitted,false);assert.equal(h.status().dispatched,true);assert.equal(h.status().safeToFallback,false);
+ await h.tick(200000);assert.equal(h.calls.filter(x=>x.kind==='file').length,1);assert.deepEqual(h.forbidden,[]);
 });
 
-test('a different open chat is never used just because its composer is ready',()=>{
-  const h=harness({phone:'967711111111'});h.start();h.tick(27);
-  assert.equal(h.send.clicks,0);assert.equal(h.field.textContent,'');
-  assert.equal(h.status().phase,'error');assert.equal(h.status().safeToFallback,true);
+test('rejection after invoking WA-JS remains uncertain with no second transport',async()=>{
+ const h=harness({send:()=>Promise.reject(Error('upload failed'))});await h.start();
+ assert.equal(h.status().phase,'uncertain');assert.equal(h.status().code,'wpp_operation_failed');assert.equal(h.status().dispatched,true);
+ assert.equal(h.calls.filter(x=>x.kind==='file').length,1);assert.deepEqual(h.forbidden,[]);
 });
 
-test('an exception during click is uncertain, cannot fall back, and releases the timer',()=>{
-  const h=harness();h.send.onClick=()=>{throw new Error('after event dispatch');};h.start();h.tick();
-  assert.equal(h.status().phase,'uncertain');assert.equal(h.status().dispatched,true);
-  assert.equal(h.status().safeToFallback,false);assert.equal(h.timers.size,0);assert.equal(h.send.clicks,1);
+test('double start and parallel prepare cannot dispatch twice',async()=>{
+ const pending=deferred(),h=harness({send:()=>pending.promise});await h.start();
+ assert.equal(h.driver.start(),false);assert.equal(h.prepare({requestId:'another'}),false);
+ pending.resolve({id:`true_${JID}_ACK`,ack:1});await flush();assert.equal(h.status().submitted,true);
+ assert.equal(h.calls.filter(x=>x.kind==='file').length,1);assert.equal(h.prepare({requestId:'next'}),true);
 });
 
-test('busy attempts and oversized chunks cannot overwrite an active job',()=>{
-  const h=harness({pdf:true});h.start();
-  assert.equal(h.driver.prepare({phone:PHONE,caption:'other'}),false);
-  assert.equal(h.driver.addChunk('ignored after start'),false);
-  h.driver.cancel();assert.equal(h.timers.size,0);
-  assert.equal(h.driver.prepare({phone:PHONE,caption:CAPTION,isPdf:true}),true);
-  assert.equal(h.driver.addChunk('a'.repeat(7000001)),false);
-  h.driver.cancel();assert.equal(h.status().phase,'idle');
+test('timeout releases visible operation but blocks dispatch while original network promise remains unresolved',async()=>{
+ const pending=deferred(),h=harness({send:()=>pending.promise});await h.start();await h.tick(100001);
+ assert.equal(h.status().phase,'uncertain');assert.equal(h.status().code,'send_timeout');assert.equal(h.timers.size,0);
+ assert.equal(h.prepare({requestId:'duplicate'}),false);h.driver.cancel();assert.equal(h.prepare({requestId:'duplicate'}),false);
+ pending.resolve({id:`true_${JID}_LATE`,ack:1});await flush();
+ assert.equal(h.status().phase,'uncertain','late completion must not change a finished button result');
+ assert.equal(h.prepare({requestId:'new-explicit-attempt'}),true);
+ assert.equal(h.calls.filter(x=>x.kind==='file').length,1);
 });
 
-test('live New chat search selects an exact phone result before writing to a saved contact',()=>{
-  const h=harness({phone:'967711111111'});
-  const trigger=new Element('BUTTON',{'aria-label':'New chat'}),drawer=new Element(),search=new Element();
-  const row=new Element('DIV',{'data-jid':`${PHONE}@c.us`},'العميل المقصود\n'+PHONE);
-  const rowTitle=new Element('SPAN',{title:'العميل المقصود'});
-  drawer.hidden=true;trigger.onClick=()=>{drawer.hidden=false;};
-  row.set('[title]',[rowTitle]);
-  row.onClick=()=>{h.head.textContent='العميل المقصود';h.title.attrs.title='العميل المقصود';};
-  drawer.set('[contenteditable="true"][role="textbox"]',[search]);
-  drawer.set('[role="listitem"],[role="row"],[role="option"],[data-testid="cell-frame-container"]',[row]);
-  h.doc.set('button[aria-label="New chat"]',[trigger]);h.doc.set('[data-testid="new-chat-drawer"]',[drawer]);
-  h.start();assert.equal(h.send.clicks,0);h.tick();assert.equal(search.textContent,PHONE);
-  h.tick();assert.equal(row.clicks,1);assert.equal(h.field.textContent,'');
-  h.tick(2);assert.equal(h.send.clicks,1);assert.equal(h.field.textContent,CAPTION);
-  h.outgoing('VERIFIED_CONTACT');h.tick();assert.equal(h.status().phase,'submitted');
+test('cancellation before recipient lookup completes prevents dispatch and ignores stale completion',async()=>{
+ const lookup=deferred(),h=harness({contact:()=>lookup.promise});await h.start();
+ h.driver.cancel();assert.equal(h.status().dispatched,false);assert.equal(h.status().code,'send_interrupted');
+ assert.equal(h.prepare({requestId:'new-request'}),true);lookup.resolve({wid:JID});await flush();
+ assert.equal(h.calls.filter(x=>x.kind==='file').length,0);assert.equal(h.status().requestId,'new-request');
 });
 
-test('a phone mentioned inside another contact preview is not a matching recipient',()=>{
-  const h=harness({phone:'967711111111'});
-  const trigger=new Element('BUTTON',{'aria-label':'New chat'}),drawer=new Element(),search=new Element();
-  const row=new Element('DIV',{},'جهة أخرى\nوصلني الرقم '+PHONE+' بالأمس');
-  drawer.set('[contenteditable="true"][role="textbox"]',[search]);
-  drawer.set('[role="listitem"],[role="row"],[role="option"],[data-testid="cell-frame-container"]',[row]);
-  h.doc.set('button[aria-label="New chat"]',[trigger]);h.doc.set('[data-testid="new-chat-drawer"]',[drawer]);
-  h.start();h.tick(35);
-  assert.equal(row.clicks,0);assert.equal(h.send.clicks,0);assert.equal(h.field.textContent,'');
-  assert.equal(h.status().phase,'error');assert.equal(h.status().safeToFallback,true);
+test('successful request ids cannot be replayed, even with another recipient',async()=>{
+ const h=harness();await h.start();assert.equal(h.prepare(),false);assert.equal(h.prepare({phone:'967700000001'}),false);
+ assert.equal(h.calls.filter(x=>x.kind==='file').length,1);
 });
 
-test('PDF picker supports wildcard and extension accept tokens with one attachment event',()=>{
-  for(const accept of ['*','*/*','.pdf','.PDF, image/png','application/*','application/pdf']){
-    const h=harness({pdf:true});h.file.attrs.accept=accept;h.start();h.tick(2);
-    assert.deepEqual(h.file.events,['change'],accept);assert.equal(h.file.files[0].type,'application/pdf',accept);
-    assert.equal(h.previewSend.clicks,1,accept);assert.equal(h.status().safeToFallback,false,accept);
-  }
+test('repeated adapter injection retains the same controller and its in-flight lock',async()=>{
+ const pending=deferred(),h=harness({send:()=>pending.promise});await h.start();
+ assert.equal(vm.runInNewContext(source,h.context),true);assert.equal(h.context.window.__qatfahDirect,h.driver);
+ assert.equal(h.prepare({requestId:'second'}),false);pending.resolve({id:`true_${JID}_ACK`,ack:1});await flush();
 });
 
-test('a PDF is not assigned to incompatible or unrelated global file inputs',()=>{
-  for(const accept of ['image/*','video/*','application/zip']){
-    const h=harness({pdf:true});h.file.attrs.accept=accept;h.start();h.tick(36);
-    assert.deepEqual(h.file.events,[]);assert.equal(h.status().code,'pdf_input_missing');
-    assert.equal(h.status().failedStage,'await_attachment');assert.equal(h.status().safeToFallback,true);
-  }
-  const h=harness({pdf:true});h.file.parent=null;h.file.attrs.accept='';h.start();h.tick(36);
-  assert.deepEqual(h.file.events,[]);assert.equal(h.status().code,'pdf_input_missing');
-  assert.equal(h.status().diagnostics.fileInputCount,1);
-  assert.equal(h.status().diagnostics.compatiblePdfInputCount,1);
+for(const value of ['', '+967782843242','96778284324','966782843242','9677828432429','96778284324a'])test(`raw native target ${JSON.stringify(value)} cannot bypass Yemen validation`,()=>{
+ const h=harness();assert.equal(h.prepare({phone:value}),false);assert.equal(h.calls.length,0);
 });
 
-test('late Attach and Document controls are found, but each is activated only once',()=>{
-  const h=harness({pdf:true}),attach=new Element('BUTTON',{'aria-label':'Attach'}),documentButton=new Element('BUTTON',{},'Document');
-  h.setFileInputs([]);attach.hidden=true;documentButton.hidden=true;
-  h.root.set('button[aria-label="Attach"]',[attach]);
-  h.doc.set('button,[role="button"],[role="menuitem"]',[documentButton]);
-  documentButton.onClick=()=>{h.file.attrs.accept='*';h.setFileInputs([h.file]);};
-  h.start();h.tick(5);assert.equal(attach.clicks,0);
-  attach.hidden=false;h.tick(5);assert.equal(attach.clicks,1);assert.equal(documentButton.clicks,0);
-  documentButton.hidden=false;h.tick(4);
-  assert.equal(attach.clicks,1);assert.equal(documentButton.clicks,1);
-  assert.deepEqual(h.file.events,['change']);assert.equal(h.previewSend.clicks,1);
-  h.tick(40);assert.equal(attach.clicks,1);assert.equal(documentButton.clicks,1);assert.equal(h.previewSend.clicks,1);
+test('invalid PDF bytes never reach WA-JS despite a plausible file extension',async()=>{
+ const h=harness();assert.equal(h.prepare(),true);assert.equal(h.driver.addChunk(Buffer.from('<html>not PDF</html>').toString('base64')),true);
+ assert.equal(h.driver.start(),true);await flush();assert.equal(h.status().code,'invalid_pdf');assert.equal(h.status().dispatched,false);
 });
 
-test('a document preview may have its own caption and send footer',()=>{
-  const h=harness({pdf:true}),previewFooter=new Element('FOOTER');
-  previewFooter.parent=h.preview;h.previewSend.footer=previewFooter;h.previewCaption.footer=previewFooter;
-  h.start();h.tick(2);
-  assert.equal(h.previewCaption.textContent,CAPTION);assert.equal(h.previewSend.clicks,1);assert.equal(h.send.clicks,0);
+test('invalid or oversize encoded PDF chunks fail before dispatch and discard the staged buffer',()=>{
+ for(const chunk of ['not base64!', 'a'.repeat(7000000)]){
+  const h=harness();assert.equal(h.prepare(),true);assert.equal(h.driver.addChunk(chunk),false);
+  assert.equal(h.status().code,'invalid_pdf');assert.equal(h.status().dispatched,false);
+ }
 });
 
-test('a new filename subtree identifies a preview without test IDs or dialog roles',()=>{
-  const h=harness({pdf:true}),name=new Element('SPAN',{},'Invoice.pdf');name.parent=h.preview;
-  h.file.onEvent=()=>{h.doc.set('[title],[aria-label],span',[name]);};
-  h.start();h.tick(2);assert.equal(h.previewSend.clicks,1);assert.equal(h.send.clicks,0);
-  assert.deepEqual(h.file.events,['change']);
-});
-
-test('an existing filename cannot turn the conversation subtree into a preview',()=>{
-  const h=harness({pdf:true}),name=new Element('SPAN',{},'Invoice.pdf');name.parent=h.root;
-  h.doc.set('[title],[aria-label],span',[name]);h.root.set('button[aria-label="Send"]',[h.send]);
-  h.file.onEvent=()=>{};h.start();h.tick(56);
-  assert.equal(h.previewSend.clicks,0);assert.equal(h.send.clicks,0);
-  assert.equal(h.status().code,'pdf_preview_missing');assert.equal(h.status().safeToFallback,false);
-});
-
-test('a role-based New chat drawer and a button with shortcut text work without test IDs',()=>{
-  const h=harness({phone:'967711111111'}),trigger=new Element('BUTTON',{'aria-label':'New chat (Ctrl+Alt+N)'});
-  const drawer=new Element('DIV',{'role':'dialog'}),heading=new Element('H2',{},'New chat'),search=new Element('DIV',{},'previous search');
-  const row=new Element('DIV',{'role':'listitem'},'العميل\n'+PHONE),title=new Element('SPAN',{title:'العميل'});
-  drawer.hidden=true;heading.parent=drawer;search.parent=drawer;
-  trigger.onClick=()=>{drawer.hidden=false;};
-  row.set('[title]',[title]);row.onClick=()=>{h.head.textContent='العميل';h.title.attrs.title='العميل';drawer.hidden=true;};
-  drawer.set('header,[role="heading"],h1,h2,h3',[heading]);
-  drawer.set('[contenteditable="true"][role="textbox"]',[search]);
-  drawer.set('[role="listitem"],[role="row"],[role="option"],[data-testid="cell-frame-container"]',[row]);
-  h.doc.set('button,[role="button"],[role="menuitem"]',[trigger]);h.doc.set('[role="dialog"],aside,section',[drawer]);
-  h.start();h.tick(4);
-  assert.equal(trigger.clicks,1);assert.equal(search.textContent,PHONE);assert.equal(row.clicks,1);
-  assert.equal(h.send.clicks,1);assert.equal(h.field.textContent,CAPTION);
-});
-
-test('recipient changes are detected before any PDF is assigned',()=>{
-  const h=harness({pdf:true});h.start();h.title.attrs.title='967700000001';h.tick();
-  assert.deepEqual(h.file.events,[]);assert.equal(h.status().code,'recipient_changed');
-  assert.equal(h.status().safeToFallback,true);assert.equal(h.previewSend.clicks,0);
-});
-
-test('a target-looking header cannot win over conflicting history that subsequently unmounts',()=>{
-  const h=harness({pdf:true});h.title.attrs.title='+'+PHONE;
-  h.outgoing('OTHER',{phone:'967799999999',body:'earlier'});
-  h.start();h.replaceMessages([]);h.tick(2);
-  assert.deepEqual(h.file.events,[]);assert.equal(h.previewSend.clicks,0);assert.equal(h.send.clicks,0);
-  assert.equal(h.status().code,'recipient_conflict');assert.equal(h.status().diagnostics.recipientVerified,false);
-  assert.equal(h.status().dispatched,false);assert.equal(h.timers.size,0);
-});
-
-test('terminal diagnostics identify the stage without copying private content',()=>{
-  const h=harness({phone:'967711111111'});h.start();h.tick(27);
-  const status=h.status();assert.equal(status.driverVersion,3);assert.equal(status.code,'new_chat_control_missing');
-  assert.equal(status.failedStage,'open_chat');assert.equal(status.diagnostics.recipientVerified,false);
-  const diagnostics=JSON.stringify(status.diagnostics);
-  assert.ok(!diagnostics.includes(PHONE));assert.ok(!diagnostics.includes(CAPTION));
-});
-
-function savedContactHarness({detailPhone=PHONE,about='',hasClose=true}={}){
-  const h=harness({phone:'967711111111'}),name='جهة محفوظة';
-  const trigger=new Element('BUTTON',{'aria-label':'New chat'}),drawer=new Element(),search=new Element();
-  const row=new Element('DIV',{'data-jid':'987654321012345@lid'},name),title=new Element('SPAN',{title:name});
-  drawer.hidden=true;trigger.onClick=()=>{drawer.hidden=false;};
-  row.set('[title]',[title]);row.onClick=()=>{h.head.textContent=name;h.title.attrs.title=name;drawer.hidden=true;};
-  drawer.set('[contenteditable="true"][role="textbox"]',[search]);
-  drawer.set('[role="listitem"],[role="row"],[role="option"],[data-testid="cell-frame-container"]',[row]);
-  h.doc.set('button[aria-label="New chat"]',[trigger]);h.doc.set('[data-testid="new-chat-drawer"]',[drawer]);
-  const info=new Element('ASIDE',{},'Contact info\n'+name+'\n+'+detailPhone+'\nAbout\n'+about);
-  const heading=new Element('H2',{},'Contact info'),open=new Element('BUTTON',{'aria-label':'Contact info'}),close=new Element('BUTTON',{'aria-label':'Close'});
-  info.hidden=true;heading.parent=info;open.onClick=()=>{info.hidden=false;};close.onClick=()=>{info.hidden=true;};
-  info.set('header,[role="heading"],h1,h2,h3',[heading]);
-  info.set('button,[role="button"],[role="menuitem"]',hasClose?[close]:[]);
-  h.head.set('button,[role="button"],[role="menuitem"]',[open]);
-  h.doc.set('[data-testid="contact-info-drawer"],[data-testid="drawer-right"],[role="dialog"],aside,section',[info]);
-  return {...h,info,openInfo:open,closeInfo:close,row};
-}
-
-test('a name-only saved contact requires its profile phone to match before staging',()=>{
-  const h=savedContactHarness();h.start();h.tick(6);
-  assert.equal(h.row.clicks,1);assert.equal(h.send.clicks,0);assert.equal(h.field.textContent,'');
-  h.tick();assert.equal(h.openInfo.clicks,1);assert.equal(h.send.clicks,0);
-  h.tick();assert.equal(h.closeInfo.clicks,1);assert.equal(h.send.clicks,0);
-  h.tick(2);assert.equal(h.send.clicks,1);assert.equal(h.field.textContent,CAPTION);
-  h.outgoing('SAVED_CONTACT');h.tick();assert.equal(h.status().phase,'submitted');
-});
-
-test('contact-info verification cannot accept contradictory history when returning to the chat',()=>{
-  const h=savedContactHarness();h.start();h.tick(8);assert.equal(h.closeInfo.clicks,1);
-  h.outgoing('OTHER',{phone:'967799999999',body:'earlier'});h.tick();
-  assert.equal(h.status().code,'recipient_conflict');assert.equal(h.status().failedStage,'await_contact_close');
-  assert.equal(h.status().diagnostics.recipientVerified,false);assert.equal(h.field.textContent,'');assert.equal(h.send.clicks,0);
-});
-
-test('a different saved contact with the target number only in About is never used',()=>{
-  const h=savedContactHarness({detailPhone:'967799999999',about:PHONE});h.start();h.tick(40);
-  assert.equal(h.row.clicks,1);assert.equal(h.openInfo.clicks,1);assert.equal(h.closeInfo.clicks,0);
-  assert.equal(h.field.textContent,'');assert.equal(h.send.clicks,0);assert.equal(h.status().code,'recipient_unverified');
-  assert.equal(h.status().failedStage,'await_contact_info');assert.equal(h.status().dispatched,false);
-});
-
-test('verified saved contact details must close before a message is composed',()=>{
-  const h=savedContactHarness({hasClose:false});h.start();h.tick(40);
-  assert.equal(h.send.clicks,0);assert.equal(h.field.textContent,'');
-  assert.equal(h.status().code,'contact_info_close_missing');assert.equal(h.status().safeToFallback,true);
-});
-
-test('an acknowledged opaque ID is accepted only when previously bound to the verified conversation',()=>{
-  const h=harness();const old=h.outgoing('OLD',{body:'earlier message'});old.attrs['data-id']='true_998877665544332@lid_OLD';
-  h.start();h.tick();const fresh=h.outgoing('NEW');fresh.attrs['data-id']='true_998877665544332@lid_NEW';h.tick();
-  assert.equal(h.status().phase,'submitted');assert.equal(h.send.clicks,1);assert.equal(h.status().deliveryConfirmed,false);
-});
-
-test('a new or unrelated opaque ID cannot be inferred to be the target phone',()=>{
-  for(const withPrior of [false,true]){
-    const h=harness();
-    if(withPrior){const old=h.outgoing('OLD',{body:'earlier'});old.attrs['data-id']='true_111122223333444@lid_OLD';}
-    h.start();h.tick();const fresh=h.outgoing('NEW');fresh.attrs['data-id']='true_998877665544332@lid_NEW';h.tick(1,15000);
-    assert.equal(h.status().phase,'uncertain');assert.equal(h.status().safeToFallback,false);assert.equal(h.send.clicks,1);
-  }
-});
-
-test('existing PDF previews or file drafts block fallback as well as new attachment',()=>{
-  const h=harness({pdf:true});h.setPreview(true);h.start();h.tick();
-  assert.equal(h.status().code,'existing_attachment_draft');assert.equal(h.status().safeToFallback,false);assert.deepEqual(h.file.events,[]);
-  const other=harness({pdf:true});other.file.files=[{name:'earlier.pdf',type:'application/pdf'}];other.start();other.tick();
-  assert.equal(other.status().code,'existing_attachment_draft');assert.equal(other.status().safeToFallback,false);
-  assert.equal(other.file.files[0].name,'earlier.pdf');assert.deepEqual(other.file.events,[]);
-});
-
-test('a previous PDF preview without dialog roles is preserved before any new file is assigned',()=>{
-  const h=harness({pdf:true}),oldName=new Element('SPAN',{},'Earlier.pdf');oldName.parent=h.preview;
-  h.doc.set('[title],[aria-label],span',[oldName]);
-  h.start();h.tick();
-  assert.equal(h.status().code,'existing_attachment_draft');assert.equal(h.status().safeToFallback,false);
-  assert.deepEqual(h.file.events,[]);assert.equal(h.previewSend.clicks,0);assert.equal(oldName.textContent,'Earlier.pdf');
-});
-
-test('a text-input exception after a possible mutation blocks fallback',()=>{
-  const h=harness();h.doc.execCommand=()=>false;h.field.onEvent=()=>{throw new Error('input hook failed');};
-  h.start();h.tick();assert.equal(h.field.textContent,CAPTION);assert.equal(h.send.clicks,0);
-  assert.equal(h.status().code,'driver_exception');assert.equal(h.status().safeToFallback,false);assert.equal(h.timers.size,0);
-});
-
-test('a file-assignment exception after a possible mutation blocks fallback',()=>{
-  const h=harness({pdf:true});let assigned;
-  Object.defineProperty(h.file,'files',{get:()=>assigned,set:value=>{assigned=value;throw new Error('file setter failed');}});
-  h.start();h.tick();assert.equal(assigned[0].name,'Invoice.pdf');assert.equal(h.previewSend.clicks,0);
-  assert.equal(h.status().code,'pdf_attach_failed');assert.equal(h.status().safeToFallback,false);assert.equal(h.timers.size,0);
+test('filename traversal, unsupported file type and overlong caption are rejected before staging',()=>{
+ for(const options of [{filename:'../secret.pdf'},{filename:'bad.exe'},{caption:'x'.repeat(3001)},{filename:'bad\u0000.pdf'},{requestId:'unsafe!'}]){
+  const h=harness();assert.equal(h.prepare(options),false);assert.equal(h.calls.length,0);
+ }
 });

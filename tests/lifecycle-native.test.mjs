@@ -42,7 +42,7 @@ test('Android injection copies the actual MainActivity and hidden engine, remove
     fs.writeFileSync(path.join(destination,'WhatsAppWebActivity.java'),'legacy visible activity');
     const manifest=path.join(app,'AndroidManifest.xml');
     // Capacitor already supplies a FileProvider. Its existence must not suppress
-    // the separate authority used by the PDF fallback in the native plugin.
+    // the separate legacy attachment authority retained for upgrade compatibility.
     const capacitorProvider='<provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths"/></provider>';
     fs.writeFileSync(manifest,'<manifest xmlns:android="http://schemas.android.com/apk/res/android"><application><activity android:name=".MainActivity"/><activity android:name=".WhatsAppWebActivity" android:exported="false"/><service android:name=".KeepThisService"/>'+capacitorProvider+'</application></manifest>');
     const inject=()=>injectAndroid('client',{cwd:temp});
@@ -51,6 +51,10 @@ test('Android injection copies the actual MainActivity and hidden engine, remove
       assert.equal(fs.readFileSync(path.join(destination,file),'utf8'),fs.readFileSync(path.join(native,file),'utf8'),`${file} must reach the APK unchanged`);
     }
     assert.equal(fs.readFileSync(path.join(app,'assets/whatsapp-direct.js'),'utf8'),fs.readFileSync(path.join(native,'whatsapp-direct.js'),'utf8'));
+    for(const name of ['wppconnect-wa.js','WPP-LICENSE.txt','wppconnect-wa.js.LICENSE.txt']){
+      assert.equal(fs.readFileSync(path.join(app,'assets',name),'utf8'),fs.readFileSync(path.join(native,'vendor',name),'utf8'));
+    }
+    assert.equal(fs.readFileSync(path.join(app,'assets/qatfah-wpp-manifest.json'),'utf8'),fs.readFileSync(path.join(native,'vendor/manifest.json'),'utf8'));
     assert.equal(fs.existsSync(path.join(destination,'WhatsAppWebActivity.java')),false);
     const first=fs.readFileSync(manifest,'utf8');
     assert.equal(first.includes('WhatsAppWebActivity'),false);
@@ -117,4 +121,30 @@ test('live transport readiness requires online authenticated UI with no reconnec
 test('only a visible explicit signed-out screen reports authentication revocation',()=>{
   assert.deepEqual(observe({revoked:true}).state,{status:'not_linked',authRevoked:true});
   assert.notEqual(observe({dialog:true,chat:true}).state.authRevoked,true);
+});
+
+test('the Android build rejects missing or modified pinned WA-JS assets',()=>{
+ for(const mutate of ['tamper','missing','manifest']){
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'qatfah-wpp-integrity-'));
+  try{
+   fs.cpSync(native,path.join(temp,'native/android'),{recursive:true});
+   const vendor=path.join(temp,'native/android/vendor');
+   if(mutate==='tamper')fs.appendFileSync(path.join(vendor,'wppconnect-wa.js'),'\n// tampered');
+   if(mutate==='missing')fs.rmSync(path.join(vendor,'wppconnect-wa.js.LICENSE.txt'));
+   if(mutate==='manifest'){
+    const manifest=JSON.parse(fs.readFileSync(path.join(vendor,'manifest.json'),'utf8'));
+    delete manifest.files['wppconnect-wa.js'];fs.writeFileSync(path.join(vendor,'manifest.json'),JSON.stringify(manifest));
+   }
+   assert.throws(()=>injectAndroid('client',{cwd:temp}),/integrity mismatch|ENOENT|Incomplete/);
+   assert.equal(fs.existsSync(path.join(temp,'android')),false,'integrity must be checked before copying native outputs');
+  }finally{fs.rmSync(temp,{recursive:true,force:true});}
+ }
+});
+
+test('native runtime pin matches build manifest and no external WhatsApp Intent API remains',()=>{
+ const manifest=JSON.parse(fs.readFileSync(path.join(native,'vendor/manifest.json'),'utf8'));
+ assert.equal(java.match(/WPP_SHA256="([a-f0-9]+)"/)?.[1],manifest.files['wppconnect-wa.js'].sha256);
+ assert.equal(java.match(/WPP_VERSION="([0-9.]+)"/)?.[1],manifest.version);
+ const plugin=fs.readFileSync(path.join(native,'QatfahNativePlugin.java'),'utf8');
+ assert.doesNotMatch(plugin,/sendWhatsAppIntent|Intent\.ACTION_SEND|com\.whatsapp\.w4b|@s\.whatsapp\.net/);
 });

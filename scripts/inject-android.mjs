@@ -1,12 +1,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {createHash} from 'node:crypto';
 
 /** Copy the checked-in Android integration verbatim into a Capacitor project. */
 export function injectAndroid(app,{cwd=process.cwd()}={}){
   if(app!=='client'&&app!=='admin')throw Error('Expected client or admin');
   if(app==='admin')return 'Admin application does not need client native plugins';
   const src=path.resolve(cwd,'native/android');
+  const vendor=path.join(src,'vendor');
+  const vendorManifest=JSON.parse(fs.readFileSync(path.join(vendor,'manifest.json'),'utf8'));
+  if(vendorManifest.package!=='@wppconnect/wa-js'||vendorManifest.version!=='4.7.1')throw Error('Unexpected WhatsApp dependency version');
+  if(Object.keys(vendorManifest.files).sort().join('|')!==['wppconnect-wa.js','WPP-LICENSE.txt','wppconnect-wa.js.LICENSE.txt'].sort().join('|'))throw Error('Incomplete WhatsApp dependency assets');
+  for(const [name,expected] of Object.entries(vendorManifest.files)){
+    if(!['wppconnect-wa.js','WPP-LICENSE.txt','wppconnect-wa.js.LICENSE.txt'].includes(name))throw Error('Unexpected WhatsApp dependency asset');
+    const bytes=fs.readFileSync(path.join(vendor,name));
+    if(bytes.length!==expected.bytes||createHash('sha256').update(bytes).digest('hex')!==expected.sha256)throw Error('WhatsApp dependency integrity mismatch: '+name);
+  }
   const dir=path.resolve(cwd,'android/app/src/main/java/com/qatfah/accounting');
   fs.mkdirSync(dir,{recursive:true});
   for(const file of ['MainActivity.java','QatfahNativePlugin.java','QatfahWhatsappDirect.java','QatfahAttachmentProvider.java']){
@@ -42,6 +52,8 @@ export function injectAndroid(app,{cwd=process.cwd()}={}){
   const assets=path.resolve(cwd,'android/app/src/main/assets');
   fs.mkdirSync(assets,{recursive:true});
   fs.copyFileSync(path.join(src,'whatsapp-direct.js'),path.join(assets,'whatsapp-direct.js'));
+  for(const name of Object.keys(vendorManifest.files))fs.copyFileSync(path.join(vendor,name),path.join(assets,name));
+  fs.copyFileSync(path.join(vendor,'manifest.json'),path.join(assets,'qatfah-wpp-manifest.json'));
   fs.writeFileSync(manifest,xml);
   // 1.13.0 adds acknowledged, site-scoped storage deletion for explicit logout.
   const gradle=path.resolve(cwd,'android/app/build.gradle');

@@ -1,6 +1,6 @@
 node_modules/
 dist/
-android/
+/android/
 .gradle/
 *.apk
 *.keystore
@@ -9,3 +9,5 @@ server/data/
 .env.*
 !.env.example
 .DS_Store
+verification-output/
+__pycache__/

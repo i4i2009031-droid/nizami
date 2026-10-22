@@ -43,8 +43,10 @@ public final class QatfahWhatsappDirect {
  private final Handler handler=new Handler(Looper.getMainLooper());
  private FrameLayout parkedFrame;
  private WebView web;
- private String script;
- private boolean released=false,loaded=false,injected=false,uploading=false;
+ private String script,wppScript;
+ private static final String WPP_VERSION="4.7.1";
+ private static final String WPP_SHA256="ed4cc6b17ce18d726b0bd89c0b30021c5b8266f823f13509c08170b7ace96126";
+ private boolean released=false,loaded=false,injected=false,wppInjected=false,uploading=false;
  private boolean permanentlyLinked,authRevoked,requiresRetry;
  private boolean authenticated=false,transportReady=false,probing=false,cleanupInProgress=false;
  private String transportStatus="not_started",lastLoadError="";
@@ -78,16 +80,27 @@ public final class QatfahWhatsappDirect {
   String version=match.find()?match.group(1):"131.0.0.0";
   return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+version+" Safari/537.36";
  }
+ private String readAsset(String name) throws Exception {
+  try(InputStream in=activity.getAssets().open(name);ByteArrayOutputStream out=new ByteArrayOutputStream()){
+   byte[] buffer=new byte[8192];int length;
+   while((length=in.read(buffer))!=-1)out.write(buffer,0,length);
+   return new String(out.toByteArray(),StandardCharsets.UTF_8);
+  }
+ }
+ private String loadWppAsset() throws Exception {
+  if(wppScript==null){
+   String candidate=readAsset("wppconnect-wa.js");
+   byte[] digest=java.security.MessageDigest.getInstance("SHA-256").digest(candidate.getBytes(StandardCharsets.UTF_8));
+   StringBuilder hex=new StringBuilder();for(byte value:digest)hex.append(String.format(java.util.Locale.ROOT,"%02x",value&255));
+   if(!WPP_SHA256.equals(hex.toString()))throw new IllegalStateException("Bundled WPP integrity mismatch");
+   wppScript=candidate;
+  }
+  return wppScript;
+ }
  private void init() throws Exception {
   if(released)throw new IllegalStateException("Activity has been destroyed");
   if(web!=null||requiresRetry||cleanupInProgress||preferences.getBoolean(LOGOUT_PENDING_KEY,false))return;
-  if(script==null){
-   try(InputStream in=activity.getAssets().open("whatsapp-direct.js");ByteArrayOutputStream out=new ByteArrayOutputStream()){
-    byte[] buffer=new byte[8192];int length;
-    while((length=in.read(buffer))!=-1)out.write(buffer,0,length);
-    script=new String(out.toByteArray(),StandardCharsets.UTF_8);
-   }
-  }
+  if(script==null)script=readAsset("whatsapp-direct.js");
   ViewGroup host=activity.findViewById(android.R.id.content);
   if(host==null)throw new IllegalStateException("Activity root is not ready");
   web=new WebView(activity);
@@ -126,7 +139,7 @@ public final class QatfahWhatsappDirect {
  private void installWebClient(){
   web.setWebViewClient(new WebViewClient(){
    @Override public void onPageStarted(WebView view,String url,android.graphics.Bitmap favicon){
-    documentGeneration++;loaded=false;injected=false;probing=false;
+    documentGeneration++;loaded=false;injected=false;wppInjected=false;probing=false;
     authenticated=false;transportReady=false;transportStatus="loading";lastLoadError="";
     if(pending!=null)finishFailure("تغيرت صفحة واتساب أثناء الإرسال؛ راجع المحادثة قبل إعادة المحاولة",!driverMayHaveStarted);
    }
@@ -137,7 +150,7 @@ public final class QatfahWhatsappDirect {
    }
    @Override public void onPageFinished(WebView view,String url){
     if(released||view!=web||!isWhatsAppUrl(url))return;
-    loaded=true;injected=false;observeSession();
+    loaded=true;injected=false;wppInjected=false;observeSession();
    }
    @Override public boolean shouldOverrideUrlLoading(WebView view,WebResourceRequest request){
     return !isWhatsAppUrl(request.getUrl().toString());
@@ -332,9 +345,9 @@ public final class QatfahWhatsappDirect {
   JSObject out=new JSObject();out.put("requestId",sendRequestId);out.put("status",status);out.put("phase",status);out.put("message",message);
   out.put("dispatched",dispatched==null?JSONObject.NULL:dispatched);
   out.put("submitted","submitted".equals(status));
-  out.put("safeToFallback",safeToFallback&&Boolean.FALSE.equals(dispatched)&&!"submitted".equals(status)&&!"uncertain".equals(status));
+  out.put("safeToFallback",false);out.put("retrySafe",safeToFallback&&Boolean.FALSE.equals(dispatched));
   out.put("code","");out.put("failedStage","");out.put("driverVersion",0);out.put("finished",false);
-  out.put("deliveryConfirmed",false);return out;
+  out.put("ack",0);out.put("messageId","");out.put("delivered",false);out.put("deliveryConfirmed",false);return out;
  }
  private void sendProgress(String phase,String message,boolean driverStarted){
   cachedSendStatus=sendResult(phase,message,driverStarted?null:Boolean.FALSE,!driverStarted);
@@ -344,12 +357,18 @@ public final class QatfahWhatsappDirect {
  }
  private JSObject driverSendResult(JSONObject state,String phase){
   Boolean dispatched=state.opt("dispatched") instanceof Boolean?(Boolean)state.opt("dispatched"):null;
-  if("submitted".equals(phase))dispatched=Boolean.TRUE;
+  int ack=state.optInt("ack",0);
+  String messageId=state.optString("messageId","");
+  boolean accepted="submitted".equals(phase)&&state.optBoolean("submitted",false)&&ack>=1&&ack<=4&&!messageId.isEmpty()&&messageId.length()<=250;
+  if("submitted".equals(phase)&&!accepted)phase="uncertain";
+  if(accepted)dispatched=Boolean.TRUE;
   String message=state.optString("message","");if(message.length()>500)message=message.substring(0,500);
-  boolean safe=Boolean.TRUE.equals(state.opt("safeToFallback"))&&Boolean.FALSE.equals(state.opt("submitted"));
+  boolean safe=Boolean.TRUE.equals(state.opt("retrySafe"))&&Boolean.FALSE.equals(state.opt("dispatched"));
   JSObject out=sendResult(phase,message,dispatched,safe);
   out.put("code",diagnosticToken(state,"code"));out.put("failedStage",diagnosticToken(state,"failedStage"));
   out.put("driverVersion",Math.max(0,Math.min(100,state.optInt("driverVersion",0))));
+  out.put("wppVersion",WPP_VERSION);out.put("submitted",accepted);out.put("ack",accepted?ack:0);
+  out.put("messageId",messageId.length()<=250?messageId:"");out.put("delivered",accepted&&ack>=2);out.put("deliveryConfirmed",accepted&&ack>=2);
   JSONObject source=state.optJSONObject("diagnostics");
   if(source!=null){
    JSObject diagnostics=new JSObject();
@@ -384,6 +403,18 @@ public final class QatfahWhatsappDirect {
  }
  private void injectAndSend(long generation){
   if(!active(generation))return;
+  if(!wppInjected){
+   try{
+    String js="(function(){try{if(window.WPP)return window.WPP.version==="+JSONObject.quote(WPP_VERSION)+";\n"+
+      loadWppAsset()+"\n;return !!window.WPP&&window.WPP.version==="+JSONObject.quote(WPP_VERSION)+";}catch(e){return false}})()";
+    web.evaluateJavascript(js,value->{
+     if(!active(generation))return;
+     if(!"true".equals(value)){finishFailure("تعذر تجهيز مكتبة الإرسال الصامت؛ لم يُرسل المستند",true,"native_wpp_injection_failed");return;}
+     wppInjected=true;injectAndSend(generation);
+    });
+   }catch(Exception e){finishFailure("تعذر تحميل مكتبة واتساب المرفقة؛ لم يُرسل المستند",true,"native_wpp_asset_failed");}
+   return;
+  }
   if(!injected){
    web.evaluateJavascript(script,value->{
     if(!active(generation))return;
@@ -393,12 +424,12 @@ public final class QatfahWhatsappDirect {
   }
   String base64=pending.getString("base64","");
   try{
-   JSONObject options=new JSONObject();options.put("phone",pending.getString("phone",""));
+   JSONObject options=new JSONObject();options.put("requestId",sendRequestId);options.put("phone",pending.getString("phone",""));
    options.put("caption",pending.getString("caption",""));options.put("filename",pending.getString("filename","Qatfah.pdf"));
    options.put("isPdf",!base64.isEmpty());
    web.evaluateJavascript("window.__qatfahDirect.prepare("+options.toString()+")",value->{
     if(!active(generation))return;
-    if(!"true".equals(value)){finishFailure("واتساب مشغول بمحاولة إرسال أخرى",false,"native_driver_busy");return;}
+    if(!"true".equals(value)){finishFailure("المحاولة السابقة لم تنتهِ بعد؛ تحقق من نتيجتها قبل إعادة الإرسال",false,"native_prior_dispatch_pending");return;}
     if(!base64.isEmpty())sendProgress("uploading","جارٍ تجهيز مرفق PDF داخل واتساب",false);
     if(base64.isEmpty())beginSend(generation);else sendChunk(base64,0,generation);
    });
@@ -418,7 +449,7 @@ public final class QatfahWhatsappDirect {
  private void beginSend(long generation){
   if(!active(generation))return;
   driverMayHaveStarted=true;
-  sendProgress("starting","جارٍ فتح محادثة المستلم داخل واتساب",true);
+  sendProgress("starting","جارٍ إرسال المستند بصمت في الخلفية",true);
   web.evaluateJavascript("window.__qatfahDirect.start()",value->{
    if(!active(generation))return;
    if(!"true".equals(value)){finishFailure("تعذر تأكيد بدء الإرسال؛ راجع المحادثة قبل إعادة المحاولة",false,"native_start_unconfirmed");return;}
@@ -431,6 +462,9 @@ public final class QatfahWhatsappDirect {
    if(!active(generation))return;
    try{
     JSONObject state=new JSONObject(decode(value));String phase=diagnosticToken(state,"phase");
+    if(!sendRequestId.equals(state.optString("requestId",""))){
+     finishFailure("تعذر مطابقة نتيجة محاولة الإرسال؛ راجع المحادثة قبل إعادة المحاولة",false,"native_request_mismatch");return;
+    }
     if(!phase.isEmpty())cachedSendStatus=driverSendResult(state,phase);
     if("submitted".equals(phase)){
      finish(cachedSendStatus);return;
@@ -455,12 +489,12 @@ public final class QatfahWhatsappDirect {
    }
    pending=call;uploading=true;driverMayHaveStarted=false;final long generation=++sendGeneration;
    sendDeadline=()->{if(active(generation))finishFailure("تعذر تأكيد نتيجة واتساب؛ راجع المحادثة قبل إعادة المحاولة",!driverMayHaveStarted,"native_send_timeout");};
-   handler.postDelayed(sendDeadline,70000);
+   handler.postDelayed(sendDeadline,120000);
    try{injectAndSend(generation);}catch(Exception e){finishFailure("تعذر بدء الإرسال داخل واتساب",!driverMayHaveStarted,"native_send_exception");}
   });
  }
  private void destroySurface(){
-  documentGeneration++;loaded=false;injected=false;probing=false;authenticated=false;transportReady=false;
+  documentGeneration++;loaded=false;injected=false;wppInjected=false;probing=false;authenticated=false;transportReady=false;
   WebView obsolete=web;web=null;
   if(parkedFrame!=null){
    if(parkedFrame.getParent() instanceof ViewGroup)((ViewGroup)parkedFrame.getParent()).removeView(parkedFrame);

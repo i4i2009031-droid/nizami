@@ -1,5 +1,6 @@
 /** Portable Qatfah bookkeeping backup. All catalogues, contacts, currencies,
  * invoices and identity settings are materialised from the original event log. */
+import {validateNewAccountingEvents} from './money-services.js';
 export const BACKUP_FORMAT = 'QatfahPortableBackup';
 export const BACKUP_VERSION = 2;
 const validCurrency = new Set(['YER','SAR','USD']);
@@ -23,6 +24,7 @@ export function parsePortableBackup(text, tenantId) {
     ids.add(event.id);
     if(event.payload.currency&&!validCurrency.has(event.payload.currency))throw new Error('عملة غير مدعومة داخل النسخة');
   }
+  validateNewAccountingEvents(data.events);
   return data;
 }
 export function backupFileName(date=new Date()){

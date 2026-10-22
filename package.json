@@ -8,6 +8,7 @@
     "build:client": "node scripts/build-web.mjs client",
     "build:admin": "node scripts/build-web.mjs admin",
     "test": "node --test tests/*.test.mjs",
+    "verify:system": "python3 run_5x_system_verification.py",
     "start:server": "node server/index.mjs"
   },
   "devDependencies": {
@@ -16,7 +17,8 @@
     "@capacitor/android": "^7.4.4",
     "@capacitor/share": "^7.0.3",
     "@capacitor/filesystem": "^7.1.4",
-    "@capacitor/browser": "^7.0.3"
+    "@capacitor/browser": "^7.0.3",
+    "playwright": "1.62.1"
   },
   "type": "module"
 }

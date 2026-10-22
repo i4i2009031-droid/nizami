@@ -9,6 +9,8 @@ import { getWhatsappStatus,getWhatsappQr,getWhatsappPairingCode,sendWhatsappMess
 import {cloudSender} from './whatsapp-cloud.mjs';
 const cloudDispatch=cloudSender({accounts:process.env.QATFAH_WA_CLOUD_ACCOUNTS||'{}'});
 import {googleDrive,driveConfigured} from './google-drive.mjs';
+import {validateSimpleJournal,validateCashMovement,validateExchange,validateRemittance,validateAccountTransfer,financialPostings} from '../apps/client/js/money-services.js';
+import {prepareEventImport} from '../apps/client/js/storage.js';
 
 const PORT = Number(process.env.QATFAH_PORT || 5059);
 const dataDir = resolve(process.env.QATFAH_DATA_DIR || resolve(fileURLToPath(new URL('./data/',import.meta.url))));
@@ -47,7 +49,7 @@ function secureUser(x){return {id:x.id,username:x.username,storeName:x.store_nam
 function str(v,max=140){return typeof v==='string'?v.trim().slice(0,max):'';}
 function validMoney(n,currency='YER'){return typeof n==='number'&&Number.isFinite(n)&&n>=0&&n<=1e12&&(currency==='YER'?Number.isSafeInteger(n):Math.abs(n*100-Math.round(n*100))<0.00001);}
 function assertValidEvent(e){
- const allowed=['party.add','party.update','item.add','item.update','balance.open','invoice.create','receipt.create','payment.create','expense.create','settings.update','event.reverse'];
+ const allowed=['party.add','party.update','item.add','item.update','balance.open','invoice.create','receipt.create','payment.create','expense.create','settings.update','event.reverse','journal.create','cash.movement','cash.open','money.exchange','fund.transfer','remittance.issue','remittance.settle'];
  if(!e||!/^[-a-f\d]{16,48}$/i.test(e.id||'')||!allowed.includes(e.type)||typeof e.payload!=='object'||!e.payload||!/^\d{4}-\d\d-\d\dT/.test(e.at||''))throw httpError(422,'EVENT_INVALID','سجل عملية غير صالح');
  const p=e.payload;const currency=p.currency||'YER';
  if(!['YER','USD','SAR'].includes(currency))throw httpError(422,'CURRENCY_INVALID','عملة غير مدعومة');
@@ -66,6 +68,16 @@ function assertValidEvent(e){
    if(!p.id||!str(p.name))throw httpError(422,'PARTY_INVALID','الاسم مطلوب');
  }else if(e.type==='event.reverse'){
    if(!str(p.ref,48))throw httpError(422,'REVERSE_INVALID','مرجع الإلغاء مفقود');
+ }else if(['journal.create','cash.movement'].includes(e.type)){
+   try{if(!validMoney(p.amount,currency)||!p.currency)throw Error('المبلغ أو العملة غير صالح');(e.type==='journal.create'?validateSimpleJournal:validateCashMovement)(p);}
+   catch(error){throw httpError(422,'ACCOUNTING_INVALID',error.message);}
+ }else if(e.type==='cash.open'){
+   if(!['cash','bank'].includes(p.account)||!validMoney(p.amount,currency)||p.amount<=0)throw httpError(422,'CASH_OPENING_INVALID','الرصيد الافتتاحي للصندوق غير صالح');
+ }else if(['money.exchange','fund.transfer','remittance.issue'].includes(e.type)){
+   try{({'money.exchange':validateExchange,'fund.transfer':validateAccountTransfer,'remittance.issue':validateRemittance}[e.type])(p);}
+   catch(error){throw httpError(422,'FINANCIAL_INVALID',error.message);}
+ }else if(e.type==='remittance.settle'){
+   if(!str(p.reference,64)||!str(p.issuedId,48))throw httpError(422,'SETTLEMENT_INVALID','مرجع الحوالة غير صالح');
  }
  if(JSON.stringify(e).length>220000)throw httpError(413,'EVENT_TOO_LARGE','حجم العملية كبير');
 }
@@ -122,7 +134,13 @@ export function createApp(){return createServer(async(req,res)=>{
      const user=ensureClient(req),b=await bodyJson(req);if(!Array.isArray(b.events)||b.events.length>100)throw httpError(422,'INVALID_BATCH','الحزمة غير صالحة');
      for(const e of b.events)assertValidEvent(e);
      const insert=db.prepare('INSERT OR IGNORE INTO events (tenant_id,id,type,payload,at) VALUES(?,?,?,?,?)');
-     db.exec('BEGIN IMMEDIATE');try{for(const e of b.events)insert.run(user.id,e.id,e.type,JSON.stringify(e.payload),e.at);db.exec('COMMIT');}catch(err){db.exec('ROLLBACK');throw err;}
+     db.exec('BEGIN IMMEDIATE');try{
+       const existing=db.prepare('SELECT id,type,payload,at FROM events WHERE tenant_id=? ORDER BY seq').all(user.id).map(row=>({...row,payload:JSON.parse(row.payload)}));
+       let additions;
+       try{additions=prepareEventImport(existing,b.events);financialPostings([...existing,...additions]);}
+       catch(error){throw httpError(422,'ACCOUNTING_CONFLICT',error.message);}
+       for(const e of additions)insert.run(user.id,e.id,e.type,JSON.stringify(e.payload),e.at);db.exec('COMMIT');
+     }catch(err){db.exec('ROLLBACK');throw err;}
      response(res,200,{ok:true,acceptedIds:b.events.map(e=>e.id)});return;
    }
    if(req.method==='GET'&&path==='/api/sync/pull'){

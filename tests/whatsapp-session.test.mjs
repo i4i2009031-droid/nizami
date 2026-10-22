@@ -1,6 +1,20 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {WA_LINK_KEY,createWhatsappSession,createWhatsappPairing,createWhatsappSender,whatsappSendMessage,whatsappSendProgressMessage,whatsappSendDetails,normalizeYemenPhone} from '../apps/client/js/whatsapp-session.js';
+import {WA_LINK_KEY,createWhatsappSession,createWhatsappPairing,createWhatsappSender as actualCreateWhatsappSender,whatsappSendMessage,whatsappSendProgressMessage,whatsappSendDetails,normalizeYemenPhone} from '../apps/client/js/whatsapp-session.js';
+
+// Native response fixtures echo requestId exactly as the real Android engine.
+// Stale/missing result tests below use the real helper directly, without this fixture adapter.
+function createWhatsappSender(options){
+ const getPlugin=options.getPlugin;
+ return actualCreateWhatsappSender({...options,getPlugin:()=>{
+  const plugin=getPlugin();if(!plugin?.sendWhatsAppInApp)return plugin;
+  return {...plugin,sendWhatsAppInApp:async request=>{
+   const value=await plugin.sendWhatsAppInApp(request);
+   if(value&&typeof value==='object')value.requestId=request.requestId;
+   return value;
+  }};
+ }});
+}
 
 function memory(initial={}){const values=new Map(Object.entries(initial));return {getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,String(value)),removeItem:key=>values.delete(key)};}
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
@@ -84,123 +98,111 @@ test('all supported Yemen formats normalize to one recipient and invalid countri
  for(const number of ['', '78284324','682843242','+966782843242','967967782843242','7a82843242','7828432429','+967'])assert.throws(()=>normalizeYemenPhone(number));
 });
 
-test('safe pre-dispatch failure opens direct recipient fallback once with the same PDF payload',async()=>{
- const sent=[],fallback=[],payload={phone:'967782843242',base64:'JVBERi0=',filename:'invoice.pdf'};
- const sender=createWhatsappSender({makeRequestId:()=> 'send-pdf',getPlugin:()=>({sendWhatsAppInApp:async value=>{sent.push(value);return {safeToFallback:true,dispatched:false};},sendWhatsAppIntent:async value=>{fallback.push(value);return {openedInWhatsApp:true,submitted:false};}})});
- const result=await sender(payload);assert.deepEqual(sent,[{...payload,requestId:'send-pdf'}]);assert.equal(fallback[0],sent[0]);assert.equal(result.submitted,false);
- assert.equal(payload.requestId,undefined);
- assert.match(whatsappSendMessage(result),/أكمل الإرسال في واتساب/);
+const payload={phone:'+967 782-843-242',caption:'فاتورة قطفة',base64:'JVBERi0=',filename:'invoice.pdf'};
+const accepted={status:'submitted',submitted:true,dispatched:true,ack:1,messageId:'true_967782843242@c.us_ACK1'};
+
+test('silent sender normalizes recipient and preserves exact PDF/caption payload',async()=>{
+ const calls=[];const sender=createWhatsappSender({makeRequestId:()=> 'silent-request',getPlugin:()=>({sendWhatsAppInApp:async value=>{calls.push(value);return accepted;}})});
+ assert.equal(await sender(payload),accepted);
+ assert.deepEqual(calls,[{...payload,phone:'967782843242',requestId:'silent-request'}]);assert.equal(payload.requestId,undefined);
 });
 
-test('a dispatched or ambiguous result never automatically retries or opens fallback',async()=>{
- let fallbacks=0;
- for(const result of [{dispatched:true,safeToFallback:true,status:'uncertain'},{submitted:true,safeToFallback:true},{status:'uncertain'}]){
-  const sender=createWhatsappSender({getPlugin:()=>({sendWhatsAppInApp:async()=>result,sendWhatsAppIntent:async()=>{fallbacks++;}})});
-  assert.equal(await sender({}),result);
+test('even an explicitly safe pre-dispatch failure never opens an app or share fallback',async()=>{
+ let fallbacks=0;const result={status:'error',safeToFallback:true,dispatched:false,message:'غير مرتبط'};
+ const sender=createWhatsappSender({getPlugin:()=>({sendWhatsAppInApp:async()=>result,sendWhatsAppIntent:async()=>{fallbacks++;}})});
+ assert.equal(await sender(payload),result);assert.equal(fallbacks,0);assert.equal(whatsappSendMessage(result),'غير مرتبط');
+});
+
+test('all uncertain or legacy results are returned without retries or UI fallback',async()=>{
+ let fallbacks=0,sends=0;
+ for(const result of [{dispatched:true,safeToFallback:true,status:'uncertain'},{submitted:true,safeToFallback:true},{status:'uncertain'},{safeToFallback:true,dispatched:null},{safeToFallback:true,dispatched:'false'}]){
+  const sender=createWhatsappSender({getPlugin:()=>({sendWhatsAppInApp:async()=>{sends++;return result;},sendWhatsAppIntent:async()=>{fallbacks++;}})});
+  assert.equal(await sender(payload),result);
  }
+ assert.equal(fallbacks,0);assert.equal(sends,5);
+});
+
+test('bridge rejection does not launch another transport',async()=>{
+ let fallbacks=0;
  const sender=createWhatsappSender({getPlugin:()=>({sendWhatsAppInApp:async()=>{throw Error('bridge lost after dispatch');},sendWhatsAppIntent:async()=>{fallbacks++;}})});
- await assert.rejects(()=>sender({}),/bridge lost/);assert.equal(fallbacks,0);
+ await assert.rejects(()=>sender(payload),/bridge lost/);assert.equal(fallbacks,0);
 });
 
-test('fallback requires explicit false dispatch even when the safe flag contradicts missing evidence',async()=>{
- let fallbacks=0;
- for(const result of [{safeToFallback:true,dispatched:null},{safeToFallback:true},{safeToFallback:true,dispatched:'false'}]){
-  const sender=createWhatsappSender({getPlugin:()=>({sendWhatsAppInApp:async()=>result,sendWhatsAppIntent:async()=>{fallbacks++;}})});
-  assert.equal(await sender({}),result);
- }
- assert.equal(fallbacks,0);
-});
-
-test('send lock prevents duplicate taps and releases after both success and rejection',async()=>{
+test('send lock prevents duplicate taps and releases after success and rejection',async()=>{
  let resolveSend,attempts=0;
- const sender=createWhatsappSender({getPlugin:()=>({sendWhatsAppInApp:()=>{attempts++;if(attempts===1)return new Promise(resolve=>{resolveSend=resolve;});if(attempts===2)throw Error('transport failure');return Promise.resolve({submitted:true});}})});
- const first=sender({});await assert.rejects(()=>sender({}),/قيد الإرسال/);assert.equal(attempts,1);
- resolveSend({submitted:true});await first;
- await assert.rejects(()=>sender({}),/transport failure/);
- assert.equal((await sender({})).submitted,true);assert.equal(attempts,3);
+ const sender=createWhatsappSender({getPlugin:()=>({sendWhatsAppInApp:()=>{attempts++;if(attempts===1)return new Promise(resolve=>{resolveSend=resolve;});if(attempts===2)throw Error('transport failure');return Promise.resolve(accepted);}})});
+ const first=sender(payload);await assert.rejects(()=>sender(payload),/قيد الإرسال/);assert.equal(attempts,1);
+ resolveSend(accepted);await first;await assert.rejects(()=>sender(payload),/transport failure/);
+ assert.equal(await sender(payload),accepted);assert.equal(attempts,3);
 });
 
-test('cached progress uses its request ID and never invokes pairing or session operations',async()=>{
- const timers=clock(),send=deferred(),progress=[],queries=[],scheduled=[],calls=[];
- let snapshot={requestId:'previous-send',phase:'verifying',finished:false};
- const plugin={
+test('cached progress reads only the active request and ends before final return',async()=>{
+ const timers=clock(),send=deferred(),progress=[],calls=[];
+ const sender=createWhatsappSender({makeRequestId:()=> 'active-send',getPlugin:()=>({
   sendWhatsAppInApp:request=>{calls.push(['send',request]);return send.promise;},
-  whatsappSendStatus:async request=>{queries.push(request);return snapshot;},
-  startWhatsAppSession:()=>assert.fail('send must not start the session'),
-  whatsappPairingStatus:()=>assert.fail('send must not inspect QR'),
-  whatsappRetryBrowser:()=>assert.fail('send must not reload WhatsApp')
- };
- const sender=createWhatsappSender({getPlugin:()=>plugin,makeRequestId:()=> 'current-send',onProgress:value=>progress.push(value),...timers,schedule:(fn,interval)=>{scheduled.push(interval);return timers.schedule(fn);}});
- const pending=sender({phone:'967782843242',caption:'test'});
- assert.deepEqual(scheduled,[850]);assert.equal(timers.timers.size,1);
- assert.equal(progress.at(-1).phase,'preparing');
- await timers.tick();assert.equal(progress.length,1);
- snapshot={requestId:'current-send',phase:'await_preview',finished:false};await timers.tick();
- assert.equal(progress.at(-1),snapshot);assert.match(whatsappSendProgressMessage(snapshot),/معاينة المستند/);
- snapshot={requestId:'current-send',phase:'error',finished:true};await timers.tick();
- assert.equal(progress.length,2);
- send.resolve({status:'submitted',submitted:true});await pending;
- assert.equal(timers.timers.size,0);assert.equal(calls.length,1);
- assert.deepEqual(queries,Array.from({length:3},()=>({requestId:'current-send'})));
+  whatsappSendStatus:async request=>{calls.push(['status',request]);return {requestId:'active-send',phase:'verifying',finished:false};}
+ }),onProgress:value=>progress.push(value),...timers});
+ const pending=sender(payload);await timers.tick();assert.deepEqual(calls[1],['status',{requestId:'active-send'}]);
+ assert.deepEqual(progress.map(x=>x.phase),['preparing','verifying']);send.resolve(accepted);assert.equal(await pending,accepted);assert.equal(timers.timers.size,0);
 });
 
-test('fallback failure preserves both causes and rejects stale driver progress',async()=>{
- const timers=clock(),send=deferred(),status=deferred(),fallback=deferred(),progress=[];
- const primary={status:'error',failedStage:'await_attachment',code:'pdf_input_missing',message:'لم يظهر حقل إرفاق المستند',driverVersion:3,safeToFallback:true,dispatched:false};
- const fallbackError=Object.assign(Error('تعذر إنشاء رابط للمرفق'),{code:'attachment_uri_failed',data:{failedStage:'fallback_provider'}});
- let attempts=0;
- const sender=createWhatsappSender({getPlugin:()=>({
-  sendWhatsAppInApp:()=>++attempts===1?send.promise:Promise.resolve({status:'submitted'}),
-  whatsappSendStatus:()=>status.promise,
-  sendWhatsAppIntent:()=>fallback.promise
- }),makeRequestId:()=> 'failed-send',onProgress:value=>progress.push(value),...timers});
- const pending=sender({}),poll=timers.tick();
- const rejected=assert.rejects(pending,error=>{
-  assert.equal(error.primaryResult,primary);assert.equal(error.fallbackError,fallbackError);assert.equal(error.cause,fallbackError);
-  assert.ok(error.message.indexOf(primary.message)<error.message.indexOf(fallbackError.message));
-  const details=whatsappSendDetails(error);
-  assert.match(details,/إرفاق ملف PDF/);assert.match(details,/pdf_input_missing/);assert.match(details,/attachment_uri_failed/);assert.match(details,/إنشاء رابط للمرفق/);assert.match(details,/المحرك: 3/);
-  return true;
- });
- send.resolve(primary);await flush();
- assert.equal(progress.at(-1).phase,'fallback_opening');assert.equal(timers.timers.size,0);
- status.resolve({requestId:'failed-send',phase:'await_attachment',finished:false});await poll;
- assert.equal(progress.at(-1).phase,'fallback_opening');
- fallback.reject(fallbackError);await rejected;
- assert.equal(timers.timers.size,0);
- assert.equal((await sender({})).status,'submitted');assert.equal(attempts,2);
-});
-
-test('missing fallback outcome also retains the original internal failure',async()=>{
- const primary={status:'error',message:'فشل فتح المحادثة',safeToFallback:true,dispatched:false,failedStage:'open_chat'};
- const sender=createWhatsappSender({getPlugin:()=>({sendWhatsAppInApp:async()=>primary,sendWhatsAppIntent:async()=>undefined})});
- await assert.rejects(()=>sender({}),error=>{
-  assert.equal(error.primaryResult,primary);assert.match(error.message,/فشل فتح المحادثة/);assert.match(error.message,/لم تصل نتيجة فتح واتساب/);return true;
- });
-});
-
-test('one cached status read at a time and late completion cannot update a finished send',async()=>{
+test('one cached status read at a time and late completion cannot update a finished operation',async()=>{
  const timers=clock(),send=deferred(),status=deferred(),progress=[];let reads=0;
  const sender=createWhatsappSender({getPlugin:()=>({sendWhatsAppInApp:()=>send.promise,whatsappSendStatus:()=>{reads++;return status.promise;}}),makeRequestId:()=> 'slow-status',onProgress:value=>progress.push(value),...timers});
- const pending=sender({}),poll=timers.tick();await timers.tick();assert.equal(reads,1);
- send.resolve({status:'submitted'});await pending;assert.equal(timers.timers.size,0);
+ const pending=sender(payload),poll=timers.tick();await timers.tick();assert.equal(reads,1);
+ send.resolve(accepted);await pending;assert.equal(timers.timers.size,0);
  status.resolve({requestId:'slow-status',phase:'verifying',finished:false});await poll;
  assert.deepEqual(progress.map(value=>value.phase),['preparing']);
 });
 
-test('status errors and rendering failures do not interrupt sending or leak timers',async()=>{
- const timers=clock(),send=deferred();let reads=0;
- const sender=createWhatsappSender({getPlugin:()=>({sendWhatsAppInApp:()=>send.promise,whatsappSendStatus:async()=>{reads++;throw Error('status unavailable');}}),onProgress:()=>{throw Error('view closed');},...timers});
- const pending=sender({});await timers.tick();assert.equal(reads,1);
- send.reject(Error('bridge lost after dispatch'));await assert.rejects(pending,/bridge lost after dispatch/);
- assert.equal(timers.timers.size,0);
+test('status from another request and finished status are never treated as progress',async()=>{
+ const timers=clock(),send=deferred(),progress=[];let counter=0;
+ const sender=createWhatsappSender({getPlugin:()=>({sendWhatsAppInApp:()=>send.promise,whatsappSendStatus:async()=>++counter===1?{requestId:'other',phase:'verifying'}:{requestId:'current',phase:'submitted',finished:true}}),makeRequestId:()=> 'current',onProgress:v=>progress.push(v),...timers});
+ const pending=sender(payload);await timers.tick();await timers.tick();send.resolve(accepted);await pending;
+ assert.deepEqual(progress.map(x=>x.phase),['preparing']);
 });
 
-test('visible diagnostics exclude payload data and uncertain results retain the actual reason',()=>{
- const value={failedStage:'await_preview',code:'pdf_preview_missing',driverVersion:3,phone:'967782843242',caption:'private invoice title',base64:'JVBERi0private',diagnostics:{phone:'do not show'}};
- const details=whatsappSendDetails(value);
- assert.match(details,/معاينة المستند/);assert.match(details,/pdf_preview_missing/);
- for(const secret of [value.phone,value.caption,value.base64,'do not show'])assert.equal(details.includes(secret),false);
- const message=whatsappSendMessage({status:'uncertain',dispatched:true,message:'انتهت مهلة تأكيد قبول المستند'});
- assert.match(message,/انتهت مهلة/);assert.match(message,/راجع المحادثة قبل إعادة المحاولة/);
+test('status and presentation failures do not interrupt actual sending or leak timers',async()=>{
+ const timers=clock(),send=deferred();let reads=0;
+ const sender=createWhatsappSender({getPlugin:()=>({sendWhatsAppInApp:()=>send.promise,whatsappSendStatus:async()=>{reads++;throw Error('status unavailable');}}),onProgress:()=>{throw Error('view closed');},...timers});
+ const pending=sender(payload);await timers.tick();assert.equal(reads,1);
+ send.reject(Error('bridge lost after dispatch'));await assert.rejects(pending,/bridge lost after dispatch/);assert.equal(timers.timers.size,0);
+});
+
+test('missing response is ambiguous and the caller can start a later deliberate attempt',async()=>{
+ let calls=0;const sender=createWhatsappSender({getPlugin:()=>({sendWhatsAppInApp:async()=>++calls===1?undefined:accepted})});
+ await assert.rejects(()=>sender(payload),/راجع المحادثة/);assert.equal(await sender(payload),accepted);assert.equal(calls,2);
+});
+
+test('invalid phone, offline state, and absent native bridge fail without sending',async()=>{
+ let sends=0;const plugin={sendWhatsAppInApp:async()=>{sends++;return accepted;}};
+ const sender=createWhatsappSender({getPlugin:()=>plugin});await assert.rejects(()=>sender({...payload,phone:'+966512345678'}),/اليمني/);
+ await assert.rejects(()=>createWhatsappSender({getPlugin:()=>plugin,isOnline:()=>false})(payload),/بالإنترنت/);
+ await assert.rejects(()=>createWhatsappSender({getPlugin:()=>null})(payload),/أندرويد/);
+ assert.equal(sends,0);assert.equal(await sender(payload),accepted);
+});
+
+test('visible messages distinguish server acceptance, delivery and missing acknowledgement',()=>{
+ assert.match(whatsappSendMessage(accepted),/خادم واتساب/);assert.doesNotMatch(whatsappSendMessage(accepted),/تم تسليم/);
+ assert.match(whatsappSendMessage({...accepted,ack:2}),/تم تسليم/);
+ for(const result of [{submitted:true},{...accepted,ack:0},{...accepted,messageId:''}])assert.match(whatsappSendMessage(result),/راجع المحادثة/);
+});
+
+test('visible diagnostics exclude file contents and provide safe stage/code details',()=>{
+ const value={failedStage:'verifying_recipient',code:'recipient_mismatch',driverVersion:4,phone:'967782843242',caption:'private invoice',base64:'JVBERi0private'};
+ const details=whatsappSendDetails(value);assert.match(details,/مطابقة رقم العميل/);assert.match(details,/recipient_mismatch/);assert.match(details,/المحرك: 4/);
+ for(const secret of [value.phone,value.caption,value.base64])assert.equal(details.includes(secret),false);
+ assert.match(whatsappSendProgressMessage({phase:'submitting'}),/في الخلفية/);
+ const msg=whatsappSendMessage({status:'uncertain',dispatched:true,message:'انتهت مهلة تأكيد قبول المستند'});assert.match(msg,/انتهت مهلة/);assert.match(msg,/راجع المحادثة/);
+});
+
+for(const nativeRequestId of ['older-request',undefined])test(`stale or missing native request id ${String(nativeRequestId)} cannot report another attempt as sent`,async()=>{
+ const timers=clock();let calls=0,fallbacks=0;
+ const sender=actualCreateWhatsappSender({makeRequestId:()=> 'current-request',getPlugin:()=>({
+  sendWhatsAppInApp:async request=>{calls++;return {...accepted,requestId:calls===1?nativeRequestId:request.requestId};},
+  sendWhatsAppIntent:async()=>{fallbacks++;}
+ }),...timers});
+ await assert.rejects(()=>sender(payload),error=>error.code==='wa_request_mismatch'&&error.primaryResult.status==='uncertain');
+ assert.equal(timers.timers.size,0);assert.equal(fallbacks,0);
+ const result=await sender(payload);assert.equal(result.requestId,'current-request');assert.equal(result.submitted,true);assert.equal(calls,2);
 });

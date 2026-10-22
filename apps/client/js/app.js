@@ -1,23 +1,24 @@
 import {setTenant,allEvents,putEvent,importEvents,commitEvents} from './storage.js';
 import {money,dateOnly,activeRecords,parties,itemsCatalog,currentSettings,statement,summary,summaryByCurrency,groupedSummary,describeEvent,CURRENCIES,rounded,balanceDescription} from './ledger.js';
-import {makePdf,makeInvoicePdf,downloadBlob,sharePdf} from './pdf.js';
+import {makePdf,downloadBlob,sharePdf} from './pdf.js';
 import {buildPortableBackup,parsePortableBackup,backupFileName} from './backup.js';
 import {authenticate,readRegistry,isSubscriptionActive} from './subscription.js';
 import {persistSessionObject,readSessionObject,clearSessionObject} from './session.js';
 import {createMoneyDesk} from './money-ui.js';
-import {accountBalances,financialPostings,fromMinor} from './money-services.js';
-import {createWhatsappSession,createWhatsappPairing,createWhatsappSender,whatsappSendMessage,whatsappSendProgressMessage,whatsappSendDetails,normalizeYemenPhone,latinPhoneDigits} from './whatsapp-session.js';
+import {accountBalances,cashbook,validateSimpleJournal,validateCashMovement} from './money-services.js';
+import {buildEventDocument,makeEventDocument} from './documents.js';
+import {createWhatsappSession,createWhatsappPairing,createWhatsappSender,whatsappSendMessage,whatsappSendDetails,normalizeYemenPhone,latinPhoneDigits} from './whatsapp-session.js';
 import {createEventBatch,invoiceEventEntries} from './event-batch.js';
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const toast=message=>{const e=$('toast');e.textContent=message;e.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>e.classList.remove('show'),3300);};
 const localDate=()=>dateOnly(new Date().toISOString());
-let state={session:null,events:[],screen:'home'};
+let state={session:null,events:[],screen:'home',cashCurrency:'YER',cashFrom:'',cashTo:''};
 let waPollBusy=false;
 let waStorage;try{waStorage=window.localStorage;}catch{}
 const waSession=createWhatsappSession({storage:waStorage,host:window,online:navigator.onLine});
 let waAuthMode=waSession.snapshot().linked?'connected':'qr';
-const waSend=createWhatsappSender({getPlugin:()=>window.Capacitor?.Plugins?.QatfahNative,isOnline:()=>navigator.onLine,onProgress:value=>showWaSendProgress(whatsappSendProgressMessage(value))});
+const waSend=createWhatsappSender({getPlugin:()=>window.Capacitor?.Plugins?.QatfahNative,isOnline:()=>navigator.onLine});
 waSession.subscribe(value=>{const root=$('wa-engine-root');if(root)root.dataset.linked=String(value.linked);renderWhatsappBadge();});
 const icons={
  sale:'<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/>',
@@ -38,7 +39,7 @@ const icons={
 };
 const svg=path=>`<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">${icons[path]||icons.sale}</svg>`;
 const shortcuts=[
- ['sales','فاتورة مبيعات','sale','tile-green'],['purchases','فاتورة مشتريات','purchase','tile-blue'],['daily-sales','مبيعات يومية','daily','tile-cyan'],['cashbook','حركة الصندوق','cash','tile-violet'],
+ ['simple-journal','قيد بسيط','receipt','tile-rose'],['sales','فاتورة مبيعات','sale','tile-green'],['purchases','فاتورة مشتريات','purchase','tile-blue'],['daily-sales','مبيعات يومية','daily','tile-cyan'],['cashbook','حركة الصندوق','cash','tile-violet'],
  ['customer','إضافة عميل','parties','tile-amber'],['supplier','إضافة مورد','suppliers','tile-cyan'],['items','الأصناف','items','tile-violet'],['receipts','سند قبض','receipt','tile-rose'],
  ['payments','سند صرف','payment','tile-indigo'],['expenses','مصروفات','expense','tile-orange'],['statements','كشف حساب','statement','tile-lime'],
  ['reports','التقارير','reports','tile-deep'],['money-services','الصرافة والحوالات','cash','tile-indigo'],['whatsapp','واتساب','whatsapp','tile-green'],['backup','نسخ احتياطي','backup','tile-purple'],
@@ -82,10 +83,10 @@ function setNetworkBadge(){
  const pill=$('server-pill');pill.classList.remove('connected');pill.innerHTML='<i class="pulse"></i> الدفتر محفوظ على الجهاز';
  waSession.setOnline(navigator.onLine);
 }
-async function record(type,payload){const e={id:crypto.randomUUID(),type,payload,at:new Date().toISOString(),synced:true};await putEvent(e);state.events=await allEvents();render();toast('تم حفظ العملية على الجهاز ✓');return e;}
-async function recordBatch(entries){const events=createEventBatch(entries);await commitEvents(events);state.events=await allEvents();render();toast('تم حفظ العملية على الجهاز ✓');return events;}
-function render(){if(!state.session)return;const p=store();$('store-name').textContent=p.name||state.session.user.storeName||'قطفة';$('store-subtitle').textContent=state.session.mode==='demo'?'دفتر حسابات محلي':'دفتر حسابات المحل';$('store-logo').src=p.logo||'./assets/icon-192.png';setNetworkBadge();document.querySelectorAll('[data-nav]').forEach(x=>x.classList.toggle('active',x.dataset.nav===state.screen));$('home-page').hidden=state.screen!=='home';$('content-page').hidden=state.screen==='home';if(state.screen==='home')renderHome();else if(state.screen==='invoices')renderInvoices();else if(state.screen==='parties')renderParties();else if(state.screen==='reports')renderReports();else renderSettings();}
-function setScreen(page){if($('wa-root-pair'))closeSheet();state.screen=page;render();window.scrollTo({top:0,behavior:'smooth'});}
+async function record(type,payload,{renderPage=true}={}){const e={id:crypto.randomUUID(),type,payload,at:new Date().toISOString(),synced:true};await putEvent(e);state.events=await allEvents();if(renderPage)render();refreshLivePickers();toast('تم حفظ العملية على الجهاز ✓');return e;}
+async function recordBatch(entries){const events=createEventBatch(entries);await commitEvents(events);state.events=await allEvents();render();refreshLivePickers();toast('تم حفظ العملية على الجهاز ✓');return events;}
+function render(){if(!state.session)return;const p=store();$('store-name').textContent=p.name||state.session.user.storeName||'قطفة';$('store-subtitle').textContent=state.session.mode==='demo'?'دفتر حسابات محلي':'دفتر حسابات المحل';$('store-logo').src=p.logo||'./assets/icon-192.png';setNetworkBadge();document.querySelectorAll('[data-nav]').forEach(x=>x.classList.toggle('active',x.dataset.nav===state.screen));$('home-page').hidden=state.screen!=='home';$('content-page').hidden=state.screen==='home';if(state.screen==='home')renderHome();else if(state.screen==='invoices')renderInvoices();else if(state.screen==='parties')renderParties();else if(state.screen==='reports')renderReports();else if(state.screen==='journal')renderSimpleJournal();else if(state.screen==='cashbook')renderCashbook();else renderSettings();}
+function setScreen(page){if(!$('sheet-backdrop').hidden)closeSheet();state.screen=page;render();window.scrollTo({top:0,behavior:'smooth'});}
 function renderHome(){const s=summary(state.events),cashYER=accountBalances(state.events).YER.cash,today=summary(state.events,localDate(),localDate());const recent=activeRecords(state.events).filter(e=>!['settings.update','party.add'].includes(e.type)).sort((a,b)=>b.at.localeCompare(a.at)).slice(0,5),people=parties(state.events);
  $('home-page').innerHTML=`
  <section class="balance-card"><small>رصيد صندوق الريال اليمني (يشمل الصرافة والحوالات)</small><strong class="big-number">${money(cashYER)}</strong>
@@ -95,12 +96,18 @@ function renderHome(){const s=summary(state.events),cashYER=accountBalances(stat
  <div class="section-title"><h2>آخر العمليات</h2><button class="text-button" data-nav-open="invoices">عرض الكل ←</button></div>
  <div class="recent-list">${recent.length?recent.map(e=>{const d=describeEvent(e,people);return `<div class="recent-item"><span class="recent-icon ${['expense.create','payment.create'].includes(e.type)?'expense':''}">${['invoice.create'].includes(e.type)?'▤':'↔'}</span><div class="recent-info"><b>${esc(d.title)} · ${esc(d.sub)}</b><small>${dateOnly(e.at)}</small></div><span class="recent-number">${money(d.amount,d.currency)}</span></div>`;}).join(''):'<div class="empty"><span class="emoji">🧾</span>لا توجد عمليات بعد. ابدأ بإنشاء فاتورة.</div>'}</div>
  `;}
-function renderInvoices(){const p=parties(state.events),records=activeRecords(state.events).filter(e=>['invoice.create','receipt.create','payment.create','expense.create'].includes(e.type)).sort((a,b)=>b.at.localeCompare(a.at));
+function renderInvoices(){const p=parties(state.events),records=activeRecords(state.events).filter(e=>['invoice.create','receipt.create','payment.create','expense.create','journal.create','cash.movement'].includes(e.type)).sort((a,b)=>b.at.localeCompare(a.at));
  $('content-page').innerHTML=`<div class="content-header"><div><h2>الفواتير والعمليات</h2><small>كل الحركات المسجلة في دفتر المحل</small></div><button class="fab" data-action="sales">+ فاتورة</button></div>
- <div class="filters"><select id="entry-filter"><option value="all">كل العمليات</option><option value="invoice.create">الفواتير</option><option value="receipt.create">القبض</option><option value="payment.create">الصرف</option><option value="expense.create">المصروفات</option></select></div>
+ <div class="filters"><select id="entry-filter"><option value="all">كل العمليات</option><option value="invoice.create">الفواتير</option><option value="receipt.create">القبض</option><option value="payment.create">الصرف</option><option value="expense.create">المصروفات</option><option value="journal.create">قيد بسيط</option><option value="cash.movement">حركة صندوق مباشرة</option></select></div>
  <div id="entries-list">${records.map(e=>invoiceCard(e,p)).join('')||'<div class="empty">لا توجد فواتير بعد</div>'}</div>`;
  $('entry-filter').addEventListener('change',ev=>{$('entries-list').innerHTML=records.filter(e=>ev.target.value==='all'||e.type===ev.target.value).map(e=>invoiceCard(e,p)).join('')||'<div class="empty">لا توجد نتائج</div>';});}
-function invoiceCard(e,p){const d=describeEvent(e,p);return `<article class="flat-card"><div class="record-head"><div><b>${esc(d.title)} · ${esc(d.sub)}</b><small>${dateOnly(e.at)} · #${esc(e.id.slice(0,8))}</small></div><div><div class="record-amount">${money(d.amount,d.currency)}</div><span class="record-badge">${e.type==='invoice.create'?(e.payload.payment==='credit'?'آجل':'نقدي'):'مسجل'}</span></div></div><div class="actions-inline"><button class="action-link" data-event="pdf:${e.id}">PDF</button><button class="action-link" data-event="share:${e.id}">واتساب</button><button class="action-link" data-event="reverse:${e.id}">إلغاء</button></div></article>`;}
+function invoiceCard(e,people){
+ const d=describeEvent(e,people),transfer=e.type==='journal.create'&&e.payload.kind==='transfer';
+ const sendButtons=transfer?[e.payload.fromPartyId,e.payload.toPartyId].map(id=>`<button class="action-link" data-event="share:${e.id}:${id}">واتساب: ${esc(people.find(p=>p.id===id)?.name||'الحساب')}</button>`).join(''):`<button class="action-link" data-event="share:${e.id}">واتساب</button>`;
+ const badge=e.type==='invoice.create'?(e.payload.payment==='credit'?'آجل':'نقدي'):e.type==='journal.create'?(e.payload.method==='cash'?'قيد نقدي':'قيد دفتري'):'مسجل';
+ return `<article class="flat-card" data-record-id="${esc(e.id)}"><div class="record-head"><div><b>${esc(d.title)} · ${esc(d.sub)}</b><small>${dateOnly(e.at)} · #${esc(e.id.slice(0,8))}</small></div><div><div class="record-amount">${money(d.amount,d.currency)}</div><span class="record-badge">${badge}</span></div></div><div class="actions-inline"><button class="action-link" data-event="pdf:${e.id}">PDF</button>${sendButtons}<button class="action-link" data-event="reverse:${e.id}">إلغاء</button></div></article>`;
+}
+
 function renderParties(){const list=parties(state.events);$('content-page').innerHTML=`<div class="content-header"><div><h2>حسابات العملاء والموردين</h2><small>حسابات له وعليه والرصيد الجاري</small></div><button class="fab" data-action="customer">+ حساب</button></div><input id="people-filter" placeholder="بحث باسم العميل أو المورد..." style="margin-bottom:13px"/><div id="people-list">${partyCards(list)}</div>`;$('people-filter').addEventListener('input',e=>{$('people-list').innerHTML=partyCards(list.filter(x=>x.name.includes(e.target.value)||x.phone?.includes(e.target.value)));});}
 function partyCards(list){return list.map(x=>{
  const details=Object.keys(CURRENCIES).map(currency=>{const b=statement(state.events,x.id,'0000-01-01','9999-12-31',currency),balance=balanceDescription(b.closing,currency);return `<span class="balance-currency" style="color:${balance.side==='debit'?'#b42318':balance.side==='credit'?'#137a4b':'#64748b'}">${currency}: <b>${money(balance.amount,currency)}</b> <small>${esc(balance.label)}</small></span>`;}).join('');
@@ -108,8 +115,8 @@ function partyCards(list){return list.map(x=>{
  }).join('')||'<div class="empty"><span class="emoji">👥</span>لم تُضف أي حساب بعد</div>';}
 function renderReports(){
  const today=localDate(),month=today.slice(0,7)+'-01';
- $('content-page').innerHTML=`<div class="content-header"><div><h2>التقارير المالية</h2><small>مبيعات يومية وشهرية وسنوية لكل عملة</small></div><button class="fab" id="print-report">▤ PDF</button></div><section class="flat-card"><div class="grid-two"><label>من تاريخ<input id="date-from" type="date" value="${month}"/></label><label>إلى تاريخ<input id="date-to" type="date" value="${today}"/></label></div><div class="grid-two"><label>تجميع التقرير<select id="group-mode"><option value="day">يومي</option><option value="month">شهري</option><option value="year">سنوي</option></select></label><label>عملة التقرير<select id="report-currency">${Object.entries(CURRENCIES).map(([k,c])=>`<option value="${k}">${esc(c.label)}</option>`).join('')}</select></label></div><div class="foot-actions"><button class="btn btn-primary" id="refresh-report">عرض التقرير</button><button class="btn btn-light" id="report-wa">واتساب</button><button class="btn btn-light" data-action="daily-sales">مبيعات اليوم</button></div></section><div id="report-results"></div><p class="footer-warning">لا تدمج العملات المختلفة دون تسجيل سعر الصرف. نتيجة النشاط المعروضة تقديرية وليست صافي الربح المحاسبي النهائي حتى احتساب تكلفة البضاعة والمخزون.</p>`;
- $('refresh-report').onclick=showReport;$('print-report').onclick=()=>reportPdf(true).catch(x=>toast(x.message));$('report-wa').onclick=async()=>{const button=$('report-wa');button.disabled=true;try{await reportPdf('whatsapp');}catch(x){toast(x.message);}finally{button.disabled=false;}};showReport();
+ $('content-page').innerHTML=`<div class="content-header"><div><h2>التقارير المالية</h2><small>مبيعات يومية وشهرية وسنوية لكل عملة</small></div><button class="fab" id="print-report">▤ PDF</button></div><section class="flat-card"><div class="grid-two"><label>من تاريخ<input id="date-from" type="date" value="${month}"/></label><label>إلى تاريخ<input id="date-to" type="date" value="${today}"/></label></div><div class="grid-two"><label>تجميع التقرير<select id="group-mode"><option value="day">يومي</option><option value="month">شهري</option><option value="year">سنوي</option></select></label><label>عملة التقرير<select id="report-currency">${Object.entries(CURRENCIES).map(([k,c])=>`<option value="${k}">${esc(c.label)}</option>`).join('')}</select></label></div>${recipientFields('report')}<div class="foot-actions"><button class="btn btn-primary" id="refresh-report">عرض التقرير</button><button class="btn btn-light" id="report-wa">واتساب</button><button class="btn btn-light" data-action="daily-sales">مبيعات اليوم</button></div></section><div id="report-results"></div><p class="footer-warning">لا تدمج العملات المختلفة دون تسجيل سعر الصرف. نتيجة النشاط المعروضة تقديرية وليست صافي الربح المحاسبي النهائي حتى احتساب تكلفة البضاعة والمخزون.</p>`;
+ $('refresh-report').onclick=showReport;$('print-report').onclick=()=>reportPdf(true).catch(x=>toast(x.message));bindRecipientFields('report');$('report-wa').onclick=()=>withWhatsappButton($('report-wa'),()=>reportPdf('whatsapp'));showReport();
 }
 function reportData(){return {from:$('date-from').value,to:$('date-to').value,group:$('group-mode').value,currency:$('report-currency').value};}
 function showReport(){
@@ -118,16 +125,16 @@ function showReport(){
 }
 async function reportPdf(share){
  const {from,to,group,currency}=reportData();if(!from||!to||from>to)throw Error('تحقق من تاريخ البداية والنهاية');
- const source=$('report-results'),list=groupedSummary(state.events,from,to,group,currency),s=summary(state.events,from,to,currency),info=store();
+ const recipient=share==='whatsapp'?normalizeYemenPhone($('report-recipient-phone').value):'',list=groupedSummary(state.events,from,to,group,currency),s=summary(state.events,from,to,currency),info=store();
  const blob=await makePdf({title:'التقرير المالي',brand:info.name,logo:info.logo,contact:info.phone,address:info.address,currency,meta:[`الفترة ${from} — ${to}`,`العملة: ${CURRENCIES[currency].label}`,`عدد العمليات: ${s.count}`],columns:['الفترة','المبيعات','المشتريات','المصروفات'],rows:list.map(x=>[x.period,money(x.sales,currency),money(x.purchases,currency),money(x.expenses,currency)]),footer:`المبيعات ${money(s.sales,currency)} • المشتريات ${money(s.purchases,currency)} • المصروفات ${money(s.expenses,currency)}`});
  const filename=`Qatfah-report-${from}-${to}-${currency}.pdf`;
- if(share==='whatsapp'){if(source.isConnected)openWhatsappRecipient({blob,filename,caption:`التقرير المالي من ${info.name} • ${from} — ${to} • ${currency}`});return;}
+ if(share==='whatsapp')return sendPdfToWhatsapp(recipient,blob,filename,`التقرير المالي من ${info.name} • ${from} — ${to} • ${currency}`);
  return share?sharePdf(blob,filename):downloadBlob(blob,filename);
 }
 
 function renderSettings(){const p=store();$('content-page').innerHTML=`<div class="content-header"><div><h2>الإعدادات</h2><small>هوية المحل والمزامنة والنسخ الاحتياطي</small></div></div><section class="flat-card"><div class="row"><img class="settings-avatar" src="${esc(p.logo||'./assets/icon-192.png')}" alt="شعار المحل"/><div><h3 style="margin-bottom:3px">${esc(p.name)}</h3><p class="muted" style="margin:0;font-size:11px">${esc(p.address||'اليمن')}</p></div></div><div class="setting-item"><span>تخصيص المحل والفواتير</span><button class="text-button" data-action="profile">تعديل ←</button></div><div class="setting-item"><span>سجل الأصناف والأسعار</span><button class="text-button" data-action="items">فتح ←</button></div><div class="setting-item"><span>النسخ الاحتياطي وGoogle Drive</span><button class="text-button" data-action="backup">فتح ←</button></div><div class="setting-item"><span>واتساب والربط</span><button class="text-button" data-action="whatsapp">الإدارة ←</button></div><div class="setting-item"><span>العمل محليًا دون خادم</span><small>مفعّل ✓</small></div><div class="setting-item"><span>الحساب الحالي</span><small>${esc(state.session.user.username||'دفتر محلي')}</small></div></section><button class="btn btn-danger btn-block" data-action="logout">تسجيل الخروج</button><div class="footer-warning">العمليات محفوظة على هذا الجهاز. احفظ نسخة JSON عبر منتقي ملفات أندرويد بصورة دورية؛ النسخة غير مشفرة وقد تحتوي بيانات مالية خاصة.</div>`;}
-const showSheet=(title,html)=>{stopWaPairingPolling();$('sheet').classList.remove('invoice-view');$('sheet-title').textContent=title;$('sheet-body').innerHTML=html;$('sheet-backdrop').hidden=false;document.body.style.overflow='hidden';};
-const closeSheet=()=>{stopWaPairingPolling();$('sheet').classList.remove('invoice-view');$('sheet-backdrop').hidden=true;document.body.style.overflow='';$('sheet-body').innerHTML='';};
+const showSheet=(title,html)=>{stopWaPairingPolling();$('sheet').qatfahBack=null;$('sheet').classList.remove('invoice-view');$('sheet-title').textContent=title;$('sheet-body').innerHTML=html;$('sheet-backdrop').hidden=false;document.body.style.overflow='hidden';};
+const closeSheet=()=>{stopWaPairingPolling();$('sheet').qatfahBack=null;$('sheet').classList.remove('invoice-view');$('sheet-backdrop').hidden=true;document.body.style.overflow='';$('sheet-body').innerHTML='';};
 const partyOptions=(chosen='')=>parties(state.events).map(p=>`<option value="${p.id}" ${p.id===chosen?'selected':''}>${esc(p.name)} (${p.type==='supplier'?'مورد':'عميل'})</option>`).join('');
 function openParty(type='customer',id=''){
  const old=id?getParty(id):null;
@@ -179,20 +186,20 @@ function openItemForm(id=''){
   await record(old?'item.update':'item.add',{id:old?.id||crypto.randomUUID(),name:String(f.get('name')).trim(),barcode,unit:f.get('unit'),prices});closeSheet();openItems();toast('تم حفظ الصنف ومزامنته مع الفواتير');
  };
 }
-function openDailySales(selectedDate=localDate(),selectedCurrency=store().currency||'YER'){
+function openDailySales(selectedDate=localDate(),selectedCurrency=store().currency||'YER',selectedParty=''){
  showSheet('مبيعات يومية',`<div class="hint">تفاصيل المبيعات اليومية حسب العملة، بدون دمج العملات المختلفة.</div>
  <div class="grid-two"><label>التاريخ<input type="date" id="daily-date" value="${esc(selectedDate)}"/></label><label>العملة<select id="daily-currency">${Object.entries(CURRENCIES).map(([k,c])=>`<option value="${k}" ${k===selectedCurrency?'selected':''}>${esc(c.label)}</option>`).join('')}</select></label></div>
- <div id="daily-results"></div><div class="foot-actions"><button class="btn btn-primary" id="daily-pdf">▣ طباعة / PDF اليوم</button><button class="btn btn-light" id="daily-wa">واتساب</button></div>`);
- const show=()=>{const date=$('daily-date').value,currency=$('daily-currency').value;
+ <label>تصفية بحساب العميل<select id="daily-party" data-live-parties data-empty-label="جميع العملاء"><option value="">جميع العملاء</option>${partyOptions(selectedParty)}</select></label><button type="button" id="daily-add-sale" class="btn btn-primary">＋ تسجيل بيع جديد</button><div id="daily-results"></div>${recipientFields('daily')}<div class="foot-actions"><button class="btn btn-primary" id="daily-pdf">▣ طباعة / PDF اليوم</button><button class="btn btn-light" id="daily-wa">واتساب</button></div>`);
+ const show=()=>{const date=$('daily-date').value,currency=$('daily-currency').value,partyId=$('daily-party').value;
  $('daily-pdf').disabled=$('daily-wa').disabled=!date;
  if(!date){$('daily-results').innerHTML='<p class="hint">اختر تاريخ التقرير</p>';return;}
- const sales=activeRecords(state.events).filter(e=>e.type==='invoice.create'&&e.payload.kind==='sale'&&dateOnly(e.at)===date&&(e.payload.currency||'YER')===currency);
+ const sales=activeRecords(state.events).filter(e=>e.type==='invoice.create'&&e.payload.kind==='sale'&&dateOnly(e.at)===date&&(e.payload.currency||'YER')===currency&&(!partyId||e.payload.partyId===partyId));
  const sum=rounded(sales.reduce((a,e)=>a+e.payload.total,0),currency),paid=rounded(sales.reduce((a,e)=>a+(e.payload.paid??(e.payload.payment==='cash'?e.payload.total:0)),0),currency);
  $('daily-results').innerHTML=`<div class="summary-boxes"><div class="summary-box positive"><small>مبيعات ${date}</small><b>${money(sum,currency)}</b></div><div class="summary-box"><small>المحصل</small><b>${money(paid,currency)}</b></div><div class="summary-box"><small>الآجل</small><b>${money(rounded(sum-paid,currency),currency)}</b></div><div class="summary-box"><small>عدد الفواتير</small><b>${sales.length}</b></div></div><div class="list-card">${sales.map(e=>`<div class="data-row"><div><b>${esc(e.payload.invoiceNumber||e.id.slice(0,8))}</b><small style="display:block">${esc(getParty(e.payload.partyId)?.name||'عميل نقدي')}</small></div><strong>${money(e.payload.total,currency)}</strong></div>`).join('')||'<div class="empty">لا توجد مبيعات في هذا اليوم</div>'}</div>`;
- const info=store(),filename=`Qatfah-Sales-${date}-${currency}.pdf`,spec={title:'تقرير المبيعات اليومية',brand:info.name,logo:info.logo,address:info.address,contact:info.phone,currency,meta:[`التاريخ: ${date}`,`العملة: ${CURRENCIES[currency].label}`,`عدد الفواتير: ${sales.length}`],columns:['رقم الفاتورة','العميل','الإجمالي','المحصل'],rows:sales.map(e=>[e.payload.invoiceNumber||e.id.slice(0,8),getParty(e.payload.partyId)?.name||'نقدي',money(e.payload.total,currency),money(e.payload.paid??(e.payload.payment==='cash'?e.payload.total:0),currency)]),footer:`إجمالي مبيعات اليوم: ${money(sum,currency)} • الآجل: ${money(sum-paid,currency)}`};
+ const info=store(),filename=`Qatfah-Sales-${date}-${currency}.pdf`,spec={title:'تقرير المبيعات اليومية',brand:info.name,logo:info.logo,address:info.address,contact:info.phone,currency,meta:[`التاريخ: ${date}`,`العملة: ${CURRENCIES[currency].label}`,`عدد الفواتير: ${sales.length}`,`الحساب: ${getParty(partyId)?.name||'جميع العملاء'}`],columns:['رقم الفاتورة','العميل','الإجمالي','المحصل'],rows:sales.map(e=>[e.payload.invoiceNumber||e.id.slice(0,8),getParty(e.payload.partyId)?.name||'نقدي',money(e.payload.total,currency),money(e.payload.paid??(e.payload.payment==='cash'?e.payload.total:0),currency)]),footer:`إجمالي مبيعات اليوم: ${money(sum,currency)} • الآجل: ${money(sum-paid,currency)}`};
  $('daily-pdf').onclick=async()=>{try{await sharePdf(await makePdf(spec),filename);}catch(err){toast(err.message);}};
- $('daily-wa').onclick=async()=>{const source=$('daily-results'),button=$('daily-wa');button.disabled=true;try{const blob=await makePdf(spec);if(source.isConnected)openWhatsappRecipient({blob,filename,caption:`تقرير مبيعات ${date} من ${info.name} • ${currency}`,onBack:()=>openDailySales(date,currency)});}catch(err){toast(err.message);}finally{button.disabled=false;}};
- };$('daily-date').onchange=show;$('daily-currency').onchange=show;show();
+ $('daily-wa').onclick=()=>withWhatsappButton($('daily-wa'),async()=>{const phone=normalizeYemenPhone($('daily-recipient-phone').value);return sendPdfToWhatsapp(phone,await makePdf(spec),filename,`تقرير مبيعات ${date} من ${info.name} • ${currency}`);});
+ };bindRecipientFields('daily');$('daily-date').onchange=show;$('daily-currency').onchange=show;$('daily-party').onchange=show;$('daily-add-sale').onclick=()=>{const date=$('daily-date').value,currency=$('daily-currency').value,partyId=$('daily-party').value;openInvoice('sale','',{partyId,currency,back:()=>openDailySales(date,currency,partyId)});};show();
 }
 
 function itemRow(item={}){
@@ -221,14 +228,14 @@ function catalogFill(row){
  invoiceTotal();
 }
 function invoiceNumber(kind){const num=activeRecords(state.events).filter(e=>e.type==='invoice.create'&&e.payload.kind===kind).length+1;return `${kind==='sale'?'INV':'PUR'}-${localDate().replaceAll('-','')}-${String(num).padStart(4,'0')}`;}
-function openInvoice(kind='sale',editId=''){
+function openInvoice(kind='sale',editId='',options={}){
  const previous=editId?activeRecords(state.events).find(e=>e.id===editId&&e.type==='invoice.create'):null;
- const data=previous?.payload||{},currency=data.currency||store().currency||'YER',people=parties(state.events),catalog=itemsCatalog(state.events);
+ const data=previous?.payload||{partyId:options.partyId||'',currency:options.currency||store().currency||'YER'},currency=data.currency||store().currency||'YER',people=parties(state.events),catalog=itemsCatalog(state.events);
  const initialParty=data.partyId||'';
  showSheet(kind==='sale'?(previous?'تعديل فاتورة بيع':'فاتورة بيع جديدة'):(previous?'تعديل فاتورة مشتريات':'فاتورة مشتريات جديدة'),`
- <form id="invoice-form" class="sheet-form pro-invoice-form">
+ <form id="invoice-form" class="sheet-form pro-invoice-form">${options.back?'<button type="button" class="text-button" id="invoice-back-daily">← العودة إلى المبيعات اليومية</button>':''}
  <div class="invoice-overview"><span>رقم الفاتورة</span><b dir="ltr">${esc(data.invoiceNumber||invoiceNumber(kind))}</b><small>${previous?dateOnly(previous.at):localDate()} • ${esc(store().name)}</small></div>
- <div class="invoice-field-pair"><label>ال${kind==='sale'?'عميل':'مورد'}<select id="invoice-party" name="partyId"><option value="">عميل نقدي / بدون حساب</option>${people.map(p=>`<option value="${p.id}" ${p.id===initialParty?'selected':''}>${esc(p.name)} • ${p.type==='supplier'?'مورد':'عميل'}</option>`).join('')}</select></label><button type="button" class="small-add" id="quick-add-customer" title="إضافة عميل">＋</button></div>
+ <div class="invoice-field-pair"><label>ال${kind==='sale'?'عميل':'مورد'}<select id="invoice-party" name="partyId" data-live-parties data-empty-label="عميل نقدي / بدون حساب"><option value="">عميل نقدي / بدون حساب</option>${people.map(p=>`<option value="${p.id}" ${p.id===initialParty?'selected':''}>${esc(p.name)} • ${p.type==='supplier'?'مورد':'عميل'}</option>`).join('')}</select></label><button type="button" class="small-add" id="quick-add-customer" title="إضافة عميل">＋</button></div>
  <div class="quick-party hide" id="quick-party"><label>اسم العميل<input id="quick-party-name" maxlength="110" placeholder="اسم العميل الجديد"/></label><label>رقم اليمن <span dir="ltr">+967</span><div class="phone-field"><b dir="ltr">+967</b><input id="quick-party-phone" type="tel" inputmode="numeric" dir="ltr" placeholder="7XXXXXXXX" maxlength="9"/></div></label><button id="quick-party-save" type="button" class="btn btn-light">إضافة إلى سجل العملاء</button></div>
  <div class="invoice-heading"><b>بنود الفاتورة</b><button class="btn btn-dark" type="button" id="barcode-scan">▦ مسح باركود</button></div>
  <datalist id="qatfah-products">${catalog.map(p=>`<option value="${esc(p.name)}"></option>`).join('')}</datalist>
@@ -241,7 +248,7 @@ function openInvoice(kind='sale',editId=''){
  <button class="btn btn-primary btn-block invoice-save" type="submit">▣ ${previous?'حفظ التصحيح':'حفظ الفاتورة دون انتظار الإنترنت'}</button>
  <small class="invoice-disclaimer">تُحفظ الفاتورة على الجهاز ويُحفظ سجل التصحيحات. للمزامنة اليدوية احفظ نسخة JSON إلى Drive واستعدها على جهاز آخر.</small>
  </form>`);
- $('sheet').classList.add('invoice-view');
+ $('sheet').classList.add('invoice-view');if(options.back){$('sheet').qatfahBack=options.back;$('invoice-back-daily').onclick=options.back;}
  const entries=$('items-container');
  $('add-invoice-item').onclick=()=>{entries.insertAdjacentHTML('beforeend',itemRow());invoiceTotal();};
  entries.addEventListener('input',ev=>{if(ev.target.classList.contains('item-title'))catalogFill(ev.target.closest('.item-entry'));else invoiceTotal();});
@@ -257,7 +264,7 @@ function openInvoice(kind='sale',editId=''){
    let phone='';try{if(raw)phone=normalizeYemenPhone(raw);}catch(err){return toast(err.message);}
    button.disabled=true;
    try{const party={id:crypto.randomUUID(),name,type:kind==='sale'?'customer':'supplier',phone,address:''};
-    await record('party.add',party);if(!$('invoice-party'))return;$('invoice-party').insertAdjacentHTML('beforeend',`<option selected value="${party.id}">${esc(name)}</option>`);$('invoice-party').value=party.id;$('quick-party').classList.add('hide');toast('تمت إضافة العميل وربطه بالفاتورة');
+    await record('party.add',party);if(!$('invoice-party'))return;$('invoice-party').value=party.id;$('quick-party').classList.add('hide');toast('تمت إضافة العميل وربطه بالفاتورة');
    }catch(err){toast(err.message);}finally{button.disabled=false;}
  };
  $('barcode-scan').onclick=()=>startBarcodeScan(code=>{
@@ -279,7 +286,7 @@ function openInvoice(kind='sale',editId=''){
   const payload={kind,payment:paid>=total?'cash':'credit',partyId,items:goods,total,paid,currency:curr,invoiceNumber:data.invoiceNumber||invoiceNumber(kind),notes:String(f.get('notes')||'').trim(),replaces:previous?.id||''};
   batch.push(...invoiceEventEntries(payload,previous));
   const button=form.querySelector('[type="submit"]');savingInvoice=true;button.disabled=true;
-  try{const saved=await recordBatch(batch);if(form.isConnected){closeSheet();openEvent(saved.at(-1).id);}}
+  try{const saved=await recordBatch(batch);if(form.isConnected){closeSheet();openEvent(saved.at(-1).id,options.back);}}
   catch(err){toast('لم تُحفظ الفاتورة: '+err.message);}finally{savingInvoice=false;button.disabled=false;}
  };
  invoiceTotal();
@@ -300,28 +307,104 @@ async function startBarcodeScan(onCode){
 
 function openMoney(kind='receipt',initialParty=''){
  const title=kind==='receipt'?'سند قبض':kind==='payment'?'سند صرف':'مصروف يومي';const type=kind==='receipt'?'receipt.create':kind==='payment'?'payment.create':'expense.create';
- const partyField=kind!=='expense'?`<label>الحساب<select name="partyId" required><option value="">اختر العميل أو المورد</option>${partyOptions(initialParty)}</select></label>`:`<label>نوع المصروف<input name="category" maxlength="100" required placeholder="إيجار / نقل / عمالة"/></label>`;
+ const partyField=kind!=='expense'?`<label>الحساب<select name="partyId" data-live-parties required><option value="">اختر العميل أو المورد</option>${partyOptions(initialParty)}</select></label>`:`<label>نوع المصروف<input name="category" maxlength="100" required placeholder="إيجار / نقل / عمالة"/></label>`;
  showSheet(title,`<form id="money-form" class="sheet-form">${partyField}<label>العملة<select name="currency">${Object.entries(CURRENCIES).map(([k,c])=>`<option value="${k}" ${k===(store().currency||'YER')?'selected':''}>${esc(c.label)} (${k})</option>`).join('')}</select></label><label>المبلغ<input type="number" name="amount" required min="0.01" max="1000000000000" step="0.01" placeholder="0"/></label><label>البيان<textarea name="notes" maxlength="600" placeholder="تفاصيل العملية"></textarea></label><button type="submit" class="btn btn-primary">حفظ ${title}</button></form>`);
  $('money-form').onsubmit=async ev=>{ev.preventDefault();const f=new FormData(ev.target),currency=f.get('currency'),amount=rounded(f.get('amount'),currency);if(!CURRENCIES[currency]||amount<=0||amount>1e12||!Number.isFinite(amount))return toast('أدخل مبلغًا صحيحًا');await record(type,{partyId:f.get('partyId')||'',category:f.get('category')||'',notes:String(f.get('notes')||''),amount,currency});closeSheet();};
 }
 
 const openMoneyServices=createMoneyDesk({events:()=>state.events,record,showSheet:(...a)=>showSheet(...a),closeSheet:()=>closeSheet(),toast:(...a)=>toast(...a),store:()=>store(),makePdf,sharePdf});
-function openCashbook(){
- showSheet('حركة الصندوق',`<div class="hint">جميع المبيعات المسددة والسندات والصرف والحوالات وحركة الصندوق تدخل في النقدية بالعملة الصحيحة. لا تُخلط العملات ولا يُحسب رصيد البنك ضمن الصندوق.</div><label>عملة الصندوق<select id="cashbook-currency">${Object.entries(CURRENCIES).map(([k,c])=>`<option value="${k}" ${k===(store().currency||'YER')?'selected':''}>${esc(c.label)} (${k})</option>`).join('')}</select></label><div id="cashbook-contents"></div>`);
- const display=()=>{
-  const currency=$('cashbook-currency').value,balances=accountBalances(state.events)[currency];
-  const journal=financialPostings(state.events).filter(x=>x.currency===currency&&x.account==='cash');
-  const group=new Map();for(const p of journal)group.set(p.eventId,(group.get(p.eventId)||0)+(p.side==='debit'?p.units:-p.units));
-  const income=[...group.values()].filter(x=>x>0).reduce((a,x)=>a+x,0),outgo=[...group.values()].filter(x=>x<0).reduce((a,x)=>a-x,0);
-  const list=activeRecords(state.events).filter(e=>group.has(e.id)).sort((a,b)=>b.at.localeCompare(a.at)).slice(0,70);
-  $('cashbook-contents').innerHTML=`<div class="summary-boxes"><div class="summary-box positive"><small>رصيد الصندوق</small><b>${money(balances.cash,currency)}</b></div><div class="summary-box"><small>مقبوضات وودائع</small><b>${money(fromMinor(income,currency),currency)}</b></div><div class="summary-box"><small>صرف نقدي وتحويلات للبنك</small><b>${money(fromMinor(outgo,currency),currency)}</b></div><div class="summary-box"><small>عدد الحركات المسجلة</small><b>${group.size}</b></div></div><div class="list-card">${list.map(e=>{const d=describeEvent(e,parties(state.events));const value=fromMinor(group.get(e.id),currency);return `<div class="data-row"><div><b>${esc(d.title)}</b><small style="display:block;color:#8ca0a4">${dateOnly(e.at)} · ${esc(d.sub)}</small></div><strong>${money(value,currency)}</strong></div>`;}).join('')||'<div class="empty">لا توجد حركات نقدية بهذه العملة</div>'}</div>`;
+function refreshLivePickers(){
+ for(const select of document.querySelectorAll('[data-live-parties]')){
+  const selected=select.value,empty=select.dataset.emptyLabel||'اختر الحساب';
+  select.innerHTML=`<option value="">${esc(empty)}</option>${partyOptions(selected)}`;select.value=selected;
+ }
+ const products=$('qatfah-products');if(products)products.innerHTML=itemsCatalog(state.events).map(p=>`<option value="${esc(p.name)}"></option>`).join('');
+}
+function currencyOptions(selected='YER'){return Object.entries(CURRENCIES).map(([id,c])=>`<option value="${id}" ${id===selected?'selected':''}>${esc(c.label)} (${id})</option>`).join('');}
+function recipientFields(prefix){return `<div class="report-recipient"><label>مستلم التقرير<select id="${prefix}-recipient-party" data-live-parties data-empty-label="اختر حساباً أو أدخل الرقم"><option value="">اختر حساباً أو أدخل الرقم</option>${partyOptions()}</select></label><label>رقم واتساب المستلم<div class="phone-field"><span class="code-country" dir="ltr">+967</span><input id="${prefix}-recipient-phone" type="tel" inputmode="numeric" dir="ltr" maxlength="9" placeholder="7XXXXXXXX"/></div></label></div>`;}
+function bindRecipientFields(prefix){
+ const input=$(prefix+'-recipient-phone'),select=$(prefix+'-recipient-party');bindYemenPhoneInput(input);
+ if(select)select.onchange=()=>{const party=getParty(select.value);try{input.value=party?.phone?normalizeYemenPhone(party.phone).slice(3):'';}catch{input.value='';}};
+}
+function renderSimpleJournal(){
+ const currency=store().currency||'YER',recent=activeRecords(state.events).filter(e=>e.type==='journal.create').sort((a,b)=>b.at.localeCompare(a.at)).slice(0,15);
+ $('content-page').innerHTML=`<div class="content-header"><div><h2>قيد بسيط</h2><small>تسجيل دين أو تسديد أو تحويل بين الحسابات</small></div><button class="text-button" data-action="cashbook">حركة الصندوق ←</button></div>
+ <form id="journal-form" class="flat-card sheet-form journal-form">
+ <div class="invoice-field-pair"><label id="journal-party-label">الحساب<select id="journal-party" name="partyId" data-live-parties required><option value="">اختر الحساب</option>${partyOptions()}</select></label><button type="button" class="small-add" id="journal-add-party" aria-label="إضافة حساب فوري">＋</button></div>
+ <section id="journal-quick-party" class="quick-party" hidden><label>اسم العميل / المورد<input id="journal-party-name" maxlength="110"/></label><label>رقم الجوال اليمني<div class="phone-field"><span class="code-country" dir="ltr">+967</span><input id="journal-party-phone" type="tel" inputmode="numeric" dir="ltr" maxlength="9" placeholder="7XXXXXXXX"/></div></label><label>نوع الحساب<select id="journal-party-type"><option value="customer">عميل</option><option value="supplier">مورد</option></select></label><button type="button" id="journal-party-save" class="btn btn-light">حفظ الحساب واختياره</button></section>
+ <fieldset class="journal-kind-field"><legend>نوع القيد</legend><input type="hidden" id="journal-kind" name="kind" value="debit"/><div class="journal-kind-options" role="radiogroup" aria-label="نوع القيد"><button type="button" role="radio" aria-checked="true" class="journal-kind debit active" data-journal-kind="debit">🔴 عليه<small>دين / سحب على العميل</small></button><button type="button" role="radio" aria-checked="false" class="journal-kind credit" data-journal-kind="credit">🟢 له<small>تسديد / توريد من العميل</small></button><button type="button" role="radio" aria-checked="false" class="journal-kind transfer" data-journal-kind="transfer">🔄 تحويل<small>نقل الدين بين حسابين</small></button></div></fieldset>
+ <label id="journal-to-label" hidden>إلى الحساب (ينتقل إليه الدين)<select id="journal-to-party" name="toPartyId" data-live-parties><option value="">اختر الحساب</option>${partyOptions()}</select></label>
+ <div class="grid-two"><label>المبلغ<input id="journal-amount" name="amount" type="number" required min="${currency==='YER'?1:0.01}" max="1000000000000" step="${currency==='YER'?1:0.01}" inputmode="decimal" placeholder="0"/></label><label>العملة<select id="journal-currency" name="currency">${currencyOptions(currency)}</select></label></div>
+ <label>طريقة القيد<select id="journal-method" name="method"><option value="book">آجل / قيد دفتري فقط بدون تأثير على الصندوق</option><option value="cash">نقداً عبر الصندوق</option></select></label>
+ <p class="hint" id="journal-effect">عليه: يزيد المبلغ المطلوب من العميل. القيد الدفتري لا يغيّر النقد في الصندوق.</p>
+ <label>البيان / الملاحظة<textarea id="journal-notes" name="notes" maxlength="600" placeholder="سبب القيد أو مرجع العملية"></textarea></label>
+ <p class="muted journal-time">التاريخ والوقت تلقائياً عند الحفظ • <time id="journal-timestamp">${new Date().toLocaleString('ar-YE',{timeZone:'Asia/Aden'})}</time></p>
+ <button type="submit" id="journal-save" class="btn btn-primary btn-block">حفظ القيد</button></form><div id="journal-saved" aria-live="polite"></div>
+ <div class="section-title"><h2>آخر القيود البسيطة</h2><span class="chip">${recent.length}</span></div><div id="journal-list">${recent.map(e=>invoiceCard(e,parties(state.events))).join('')||'<div class="empty">لا توجد قيود بسيطة بعد</div>'}</div>`;
+ const form=$('journal-form'),method=$('journal-method'),kind=$('journal-kind');
+ const updateKind=()=>{
+  const transfer=kind.value==='transfer',cash=method.value==='cash';
+  $('journal-to-label').hidden=!transfer;$('journal-to-party').required=transfer;
+  method.disabled=transfer;if(transfer)method.value='book';
+  $('journal-effect').textContent=transfer?'ينقص الدين على الحساب الأول ويزيد على الحساب الثاني بالمبلغ نفسه. التحويل دفتري ولا يحرك الصندوق.':kind.value==='debit'?(cash?'عليه نقداً: صرف مبلغ من الصندوق للعميل، فيزيد الدين عليه وينقص النقد.':'عليه دفترياً: يزيد الدين على العميل دون تغيير الصندوق.'):(cash?'له نقداً: قبض مبلغ من العميل، فينقص الدين عليه ويزيد النقد.':'له دفترياً: ينقص الدين على العميل دون تغيير الصندوق.');
+  for(const button of form.querySelectorAll('[data-journal-kind]')){const active=button.dataset.journalKind===kind.value;button.classList.toggle('active',active);button.setAttribute('aria-checked',String(active));}
  };
- $('cashbook-currency').onchange=display;display();
+ for(const button of form.querySelectorAll('[data-journal-kind]'))button.onclick=()=>{kind.value=button.dataset.journalKind;updateKind();};
+ method.onchange=updateKind;
+ $('journal-currency').onchange=()=>{const step=$('journal-currency').value==='YER'?'1':'0.01';$('journal-amount').step=step;$('journal-amount').min=step;};
+ $('journal-add-party').onclick=()=>{$('journal-quick-party').hidden=!$('journal-quick-party').hidden;};bindYemenPhoneInput($('journal-party-phone'));
+ $('journal-party-save').onclick=async()=>{
+  const button=$('journal-party-save'),name=$('journal-party-name').value.trim();if(!name)return toast('أدخل اسم الحساب');
+  let phone='';try{if($('journal-party-phone').value.trim())phone=normalizeYemenPhone($('journal-party-phone').value);}catch(error){return toast(error.message);}
+  button.disabled=true;try{const party={id:crypto.randomUUID(),name,phone,type:$('journal-party-type').value,address:''};await record('party.add',party,{renderPage:false});if(form.isConnected){$('journal-party').value=party.id;$('journal-quick-party').hidden=true;}toast('تمت إضافة الحساب وأصبح متاحاً في جميع الأقسام');}catch(error){toast(error.message);}finally{button.disabled=false;}
+ };
+ let saving=false;
+ form.onsubmit=async ev=>{
+  ev.preventDefault();if(saving)return;const f=new FormData(form),type=String(f.get('kind')),partyId=String(f.get('partyId')||'');
+  const rawPayload={kind:type,amount:Number(f.get('amount')),currency:String(f.get('currency')),method:type==='transfer'?'book':String(f.get('method')),notes:String(f.get('notes')||'').trim(),...(type==='transfer'?{fromPartyId:partyId,toPartyId:String(f.get('toPartyId')||'')}:{partyId})};
+  let payload;try{payload=validateSimpleJournal(rawPayload,state.events);}catch(error){return toast(error.message);}
+  saving=true;$('journal-save').disabled=true;
+  try{const saved=await record('journal.create',payload);if(state.screen==='journal'){$('journal-list').querySelector(`[data-record-id="${saved.id}"]`)?.remove();$('journal-saved').innerHTML=`<section class="journal-saved flat-card"><h3>✓ تم حفظ القيد وربط الحسابات</h3><p>يمكن إرسال سند القيد مباشرة من زر واتساب أدناه.</p>${invoiceCard(saved,parties(state.events))}</section>`;}}
+  catch(error){toast('لم يُحفظ القيد: '+error.message);}finally{saving=false;if($('journal-save'))$('journal-save').disabled=false;}
+ };
+ updateKind();
+}
+function openCashbook(){state.cashCurrency=state.cashCurrency||store().currency||'YER';setScreen('cashbook');}
+function cashbookData(){return cashbook(state.events,state.cashCurrency,state.cashFrom||'0000-01-01',state.cashTo||'9999-12-31');}
+function cashbookReportSpec(){
+ const data=cashbookData(),info=store(),currency=data.currency;
+ return {data,spec:{title:'تقرير حركة الصندوق',brand:info.name,logo:info.logo,address:info.address,contact:info.phone,currency,meta:[`العملة: ${CURRENCIES[currency].label}`,`الفترة: ${state.cashFrom||'من البداية'} إلى ${state.cashTo||'حتى الآن'}`,`الرصيد الافتتاحي: ${money(data.opening,currency)}`],columns:['التاريخ والوقت','المصدر','الوارد','الصادر','الرصيد'],rows:data.rows.map(r=>[new Date(r.at).toLocaleString('ar-YE',{timeZone:'Asia/Aden',dateStyle:'short',timeStyle:'short'}),r.source,!r.isOpening&&r.direction==='in'?money(r.amount,currency):'—',!r.isOpening&&r.direction==='out'?money(r.amount,currency):'—',money(r.runningBalance,currency)]),footer:`الوارد: ${money(data.incoming,currency)} • الصادر: ${money(data.outgoing,currency)} • صافي الصندوق: ${money(data.closing,currency)}`}};
+}
+function renderCashbook(){
+ const currency=state.cashCurrency,data=cashbookData();
+ $('content-page').innerHTML=`<div class="content-header"><div><h2>حركة الصندوق</h2><small>النقد الفعلي في درج المحل فقط</small></div><button class="text-button" data-action="simple-journal">قيد بسيط ←</button></div>
+ <div class="cash-currency-tabs" id="cashbook-currency" role="tablist" aria-label="عملة الصندوق">${['YER','SAR','USD'].map(code=>`<button type="button" role="tab" data-cash-currency="${code}" aria-selected="${currency===code}" class="${currency===code?'active':''}">${esc(CURRENCIES[code].label)}<small>${esc(CURRENCIES[code].symbol)}</small></button>`).join('')}</div>
+ <div class="hint">الفاتورة الآجلة لا تغيّر الصندوق. تظهر هنا المبالغ النقدية المقبوضة والمدفوعة فقط، بعملة مستقلة لكل رصيد.</div>
+ <div class="grid-two cash-period"><label>من تاريخ (اختياري)<input id="cashbook-from" type="date" value="${state.cashFrom}"/></label><label>إلى تاريخ (اختياري)<input id="cashbook-to" type="date" value="${state.cashTo}"/></label></div>
+ <p class="cash-opening">الرصيد الافتتاحي <strong id="cashbook-opening" data-value="${data.opening}">${money(data.opening,currency)}</strong></p>
+ <div class="cash-summary" id="cashbook-summary"><div class="cash-metric cash-in"><small>➕ إجمالي الوارد للصندوق</small><b id="cashbook-incoming" data-value="${data.incoming}">${money(data.incoming,currency)}</b><span>مقبوضات نقدية</span></div><div class="cash-metric cash-out"><small>➖ إجمالي الصادر من الصندوق</small><b id="cashbook-outgoing" data-value="${data.outgoing}">${money(data.outgoing,currency)}</b><span>مدفوعات ومصاريف</span></div><div class="cash-metric cash-net"><small>💰 صافي النقد في الصندوق</small><b id="cashbook-closing" data-value="${data.closing}">${money(data.closing,currency)}</b><span>الافتتاحي + الوارد − الصادر</span></div></div>
+ <div class="foot-actions"><button class="btn btn-primary" id="cashbook-add">＋ إضافة حركة صندوق مباشرة</button><button class="btn btn-light" id="cashbook-pdf">▤ طباعة / تقرير PDF</button></div>
+ <form id="cash-movement-form" class="flat-card sheet-form" hidden><h3>حركة نقدية مباشرة · ${esc(CURRENCIES[currency].label)}</h3><div class="grid-two"><label>نوع الحركة<select id="cash-direction" name="direction"><option value="in">إيداع / تغذية رأس مال</option><option value="out">سحب مصروف / سحب المالك</option></select></label><label>المبلغ<input id="cash-amount" name="amount" type="number" inputmode="decimal" required min="${currency==='YER'?1:0.01}" max="1000000000000" step="${currency==='YER'?1:0.01}"/></label></div><label>المصدر<select name="category" id="cash-category"><option value="capital">تغذية رأس مال</option></select></label><label>البيان<textarea name="notes" maxlength="600" placeholder="مصدر الإيداع أو سبب السحب"></textarea></label><button type="submit" class="btn btn-primary" id="cash-save">حفظ حركة الصندوق</button></form>
+ <section class="flat-card cash-report-send"><h3>إرسال تقرير الصندوق</h3>${recipientFields('cashbook')}<button class="btn btn-light" id="cashbook-wa">إرسال التقرير PDF واتساب</button></section>
+ <div class="section-title"><h2>الحركات النقدية بالتسلسل</h2><span class="chip">${data.rows.length} حركة</span></div><p class="muted" style="font-size:11px">اسحب الجدول أفقياً لعرض رصيد الصندوق بعد كل حركة.</p><div class="flat-card table-scroll"><table class="report-table" id="cashbook-table"><thead><tr><th>التاريخ والوقت</th><th>النوع</th><th>المصدر</th><th>المبلغ</th><th>رصيد الصندوق بعد الحركة</th></tr></thead><tbody>${data.rows.map(r=>`<tr data-event-id="${esc(r.id)}" data-direction="${r.direction}" data-amount="${r.amount}" data-balance="${r.runningBalance}" data-opening="${Boolean(r.isOpening)}"><td>${esc(new Date(r.at).toLocaleString('ar-YE',{timeZone:'Asia/Aden',dateStyle:'short',timeStyle:'short'}))}</td><td class="${r.direction==='in'?'cash-in-text':'cash-out-text'}">${r.isOpening?'افتتاحي':r.direction==='in'?'وارد':'صادر'}</td><td>${esc(r.source)}</td><td>${money(r.amount,currency)}</td><td>${money(r.runningBalance,currency)}</td></tr>`).join('')||'<tr><td colspan="5">لا توجد حركات نقدية في هذه الفترة والعملة</td></tr>'}</tbody></table></div>`;
+ for(const button of document.querySelectorAll('[data-cash-currency]'))button.onclick=()=>{state.cashCurrency=button.dataset.cashCurrency;renderCashbook();};
+ const dateChanged=()=>{const from=$('cashbook-from').value,to=$('cashbook-to').value;if(from&&to&&from>to)return toast('تاريخ البداية يجب أن يسبق النهاية');state.cashFrom=from;state.cashTo=to;renderCashbook();};
+ $('cashbook-from').onchange=dateChanged;$('cashbook-to').onchange=dateChanged;
+ $('cashbook-add').onclick=()=>{$('cash-movement-form').hidden=!$('cash-movement-form').hidden;};
+ $('cash-direction').onchange=()=>{$('cash-category').innerHTML=$('cash-direction').value==='in'?'<option value="capital">تغذية رأس مال</option>':'<option value="expense">مصروف يومي</option><option value="withdrawal">سحب المالك</option>';};
+ let saving=false;$('cash-movement-form').onsubmit=async ev=>{
+  ev.preventDefault();if(saving)return;const form=ev.target,f=new FormData(form),rawPayload={direction:String(f.get('direction')),amount:Number(f.get('amount')),category:String(f.get('category')),currency,notes:String(f.get('notes')||'').trim()};
+  let payload;try{payload=validateCashMovement(rawPayload);}catch(error){return toast(error.message);}
+  saving=true;$('cash-save').disabled=true;try{await record('cash.movement',payload);}catch(error){toast('لم تُحفظ الحركة: '+error.message);}finally{saving=false;if($('cash-save'))$('cash-save').disabled=false;}
+ };
+ bindRecipientFields('cashbook');
+ $('cashbook-pdf').onclick=async()=>{try{const {spec}=cashbookReportSpec();await sharePdf(await makePdf(spec),`Qatfah-Cashbook-${currency}.pdf`);}catch(error){toast(error.message);}};
+ $('cashbook-wa').onclick=()=>withWhatsappButton($('cashbook-wa'),async()=>{const phone=normalizeYemenPhone($('cashbook-recipient-phone').value),{spec}=cashbookReportSpec();return sendPdfToWhatsapp(phone,await makePdf(spec),`Qatfah-Cashbook-${currency}.pdf`,`تقرير حركة صندوق ${store().name} • ${currency}`);});
 }
 
 function openStatement(partyId=''){
  const currencies=Object.entries(CURRENCIES).map(([k,c])=>`<option value="${k}">${esc(c.label)} (${k})</option>`).join('');
- showSheet('كشف حساب تفصيلي',`<form id="statement-form" class="sheet-form"><label>العميل / المورد<select name="partyId" required><option value="">اختر الحساب</option>${partyOptions(partyId)}</select></label><label>عملة الحساب<select name="currency">${currencies}</select></label><div class="grid-two"><label>من تاريخ<input name="from" type="date" value="${localDate().slice(0,7)}-01" required/></label><label>إلى تاريخ<input name="to" type="date" value="${localDate()}" required/></label></div><button type="submit" class="btn btn-primary">عرض كشف الحساب</button></form><div id="statement-result"></div>`);
+ showSheet('كشف حساب تفصيلي',`<form id="statement-form" class="sheet-form"><label>العميل / المورد<select name="partyId" data-live-parties required><option value="">اختر الحساب</option>${partyOptions(partyId)}</select></label><label>عملة الحساب<select name="currency">${currencies}</select></label><div class="grid-two"><label>من تاريخ<input name="from" type="date" value="${localDate().slice(0,7)}-01" required/></label><label>إلى تاريخ<input name="to" type="date" value="${localDate()}" required/></label></div><button type="submit" class="btn btn-primary">عرض كشف الحساب</button></form><div id="statement-result"></div>`);
  $('statement-form').onsubmit=e=>{e.preventDefault();const f=new FormData(e.target),from=f.get('from'),to=f.get('to'),pid=f.get('partyId'),currency=f.get('currency');if(from>to)return toast('تأكد من تواريخ الفترة');const p=getParty(pid),s=statement(state.events,pid,from,to,currency);if(!p)return toast('اختر الحساب');
  const describe=amount=>{const value=balanceDescription(amount,currency);return {...value,text:`${value.label} ${money(value.amount,currency)}`,color:value.side==='debit'?'#b42318':value.side==='credit'?'#137a4b':'#64748b'};};
  const opening=describe(s.opening),closing=describe(s.closing);
@@ -329,65 +412,48 @@ function openStatement(partyId=''){
  $('statement-result').innerHTML=`<section class="flat-card" style="margin-top:18px"><div class="row-between"><h3>${esc(p.name)}</h3><span class="chip" style="color:${closing.color};background:${closing.side==='debit'?'#fff1f0':closing.side==='credit'?'#edf9f1':'#f1f5f9'}">${esc(closing.text)}</span></div><div class="hint">رقم الهاتف: ${p.phone?'+'+esc(p.phone):'غير مسجل'} • العملة: ${currency}</div><div class="data-row"><b>الرصيد السابق</b><strong style="color:${opening.color}">${esc(opening.text)}</strong></div><div class="table-scroll"><table class="report-table"><thead><tr><th>التاريخ</th><th>الحركة</th><th style="color:#b42318">عليه / مدين</th><th style="color:#137a4b">له / دائن</th><th>الرصيد</th></tr></thead><tbody>${rows||'<tr><td colspan="5">لا توجد حركات في الفترة</td></tr>'}</tbody></table></div><div class="data-row"><b>الرصيد النهائي</b><strong style="color:${closing.color}">${esc(closing.text)}</strong></div><div class="foot-actions"><button id="statement-pdf" class="btn btn-primary">▤ عرض / PDF</button><button id="statement-wa" class="btn btn-light">إرسال كشف PDF واتساب</button></div></section>`;
  const generate=()=>makePdf({title:`كشف حساب ${p.name}`,brand:store().name,logo:store().logo,address:store().address,contact:store().phone,currency,meta:[`من ${from} إلى ${to}`,`الرصيد السابق: ${opening.text}`,`العملة ${CURRENCIES[currency].label}`],columns:['التاريخ','العملية','عليه / مدين','له / دائن','الرصيد'],rows:s.rows.map(x=>[dateOnly(x.at),x.title,x.change>0?money(x.change,currency):'—',x.change<0?money(-x.change,currency):'—',describe(x.balance).text]),footer:`الرصيد النهائي: ${closing.text}`});
  $('statement-pdf').onclick=async()=>{try{await sharePdf(await generate(),`Qatfah-Statement-${currency}.pdf`);}catch(err){toast(err.message)}};
- $('statement-wa').onclick=async()=>{try{await sendPdfToWhatsapp(p.phone,await generate(),`Qatfah-Statement-${currency}.pdf`,`كشف حساب ${p.name} من ${store().name} • من ${from} إلى ${to} • ${closing.text}`);}catch(err){toast(err.message)}};
+ $('statement-wa').onclick=()=>withWhatsappButton($('statement-wa'),async()=>{normalizeYemenPhone(p.phone);return sendPdfToWhatsapp(p.phone,await generate(),`Qatfah-Statement-${currency}.pdf`,`كشف حساب ${p.name} من ${store().name} • من ${from} إلى ${to} • ${closing.text}`);});
  };
 }
-function openEvent(id){
+function openEvent(id,backAction=null){
  const e=activeRecords(state.events).find(x=>x.id===id);if(!e)return toast('العملية غير موجودة');const d=describeEvent(e,parties(state.events)),p=e.payload,person=getParty(p.partyId),currency=p.currency||'YER';
  showSheet(`تفاصيل ${d.title}`,`<section class="flat-card"><div class="row-between"><b>${esc(d.title)}</b><span class="chip">${dateOnly(e.at)}</span></div><div class="data-row"><span>رقم المستند</span><strong dir="ltr">${esc(p.invoiceNumber||e.id.slice(0,12))}</strong></div><div class="data-row"><span>الجهة</span><b>${esc(person?.name||p.category||'نقدي')}</b></div>${e.type==='invoice.create'?`<div class="data-row"><span>الدفع</span><b>${p.payment==='cash'?'نقدي':'آجل / جزئي'}</b></div>${p.items.map(x=>`<div class="data-row"><span>${esc(x.title)} × ${x.qty}</span><b>${money(rounded(x.qty*x.price,currency),currency)}</b></div>`).join('')}<div class="data-row"><span>المدفوع</span><b>${money(p.paid??(p.payment==='cash'?p.total:0),currency)}</b></div><div class="data-row"><span>المتبقي</span><b>${money(p.total-(p.paid??(p.payment==='cash'?p.total:0)),currency)}</b></div>`:''}<div class="data-row"><b>الإجمالي</b><strong>${money(d.amount,currency)}</strong></div>${p.notes?`<p class="hint">${esc(p.notes)}</p>`:''}
  <div class="foot-actions"><button class="btn btn-primary" id="detail-pdf">▤ طباعة / PDF</button><button class="btn btn-light" id="detail-wa">إرسال PDF واتساب</button>${e.type==='invoice.create'?'<button class="btn btn-light" id="detail-edit">✎ تعديل الفاتورة</button>':''}</div></section>`);
- const filename=`Qatfah-${p.invoiceNumber||e.id.slice(0,8)}.pdf`;
- const make=()=>e.type==='invoice.create'?makeInvoicePdf({event:e,brandInfo:store(),party:person||{}}):makePdf({title:d.title,brand:store().name,logo:store().logo,contact:store().phone,address:store().address,currency,meta:[`الرقم: ${e.id.slice(0,12)}`,`التاريخ: ${dateOnly(e.at)}`,`الجهة: ${person?.name||p.category||'نقدي'}`],columns:['البيان','العدد','القيمة'],rows:[[d.title,'1',money(d.amount,currency)]],footer:`الإجمالي ${money(d.amount,currency)} · ${store().phone||''}`});
- $('detail-pdf').onclick=async()=>{try{await sharePdf(await make(),filename);}catch(err){toast('تعذر إنشاء المستند: '+err.message)}};
- $('detail-wa').onclick=async()=>{try{await sendPdfToWhatsapp(person?.phone,await make(),filename,`${d.title} ${p.invoiceNumber||e.id.slice(0,8)} • ${money(d.amount,currency)} • ${store().name}`);}catch(err){toast(err.message)}};
- if(e.type==='invoice.create')$('detail-edit').onclick=()=>openInvoice(p.kind,e.id);
+ $('detail-pdf').onclick=async()=>{try{const doc=await makeEventDocument(e,state.events,store());await sharePdf(doc.blob,doc.filename);}catch(err){toast('تعذر إنشاء المستند: '+err.message);}};
+ $('detail-wa').onclick=()=>sendEventWhatsapp(e,$('detail-wa'));
+ if(backAction){$('sheet').qatfahBack=backAction;$('sheet-body').insertAdjacentHTML('beforeend','<button type="button" id="detail-back-daily" class="btn btn-light btn-block">العودة إلى المبيعات اليومية</button>');$('detail-back-daily').onclick=backAction;}
+ if(e.type==='invoice.create')$('detail-edit').onclick=()=>openInvoice(p.kind,e.id,{back:backAction});
 }
 function fixWhatsappNumber(phone){return normalizeYemenPhone(phone);}
-function openWhatsappRecipient({blob,filename,caption,onBack=()=>closeSheet()}){
- const contacts=parties(state.events);
- showSheet('إرسال PDF عبر واتساب',`<form id="wa-recipient-form" class="sheet-form"><p class="hint">${esc(caption)}</p><label>حساب محفوظ<select id="wa-recipient-party"><option value="">إدخال رقم المستلم</option>${contacts.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}${p.phone?' • +'+esc(p.phone):' • دون رقم'}</option>`).join('')}</select></label><label>رقم المستلم<div class="phone-field"><span class="code-country" dir="ltr">+967</span><input id="wa-recipient-number" type="tel" inputmode="numeric" dir="ltr" maxlength="9" placeholder="7XXXXXXXX" required/></div></label><button class="btn btn-primary btn-block" type="submit">إرسال المستند</button><button id="wa-recipient-back" class="btn btn-light btn-block" type="button">العودة للتقرير</button></form>`);
- const form=$('wa-recipient-form'),input=$('wa-recipient-number');bindYemenPhoneInput(input);
- $('wa-recipient-party').onchange=e=>{const party=contacts.find(x=>x.id===e.target.value);if(!party?.phone){input.value='';return;}try{input.value=normalizeYemenPhone(party.phone).slice(3);}catch(err){input.value='';toast(err.message);}};
- $('wa-recipient-back').onclick=onBack;
- let sending=false;
- form.onsubmit=async e=>{e.preventDefault();if(sending)return;let phone;try{phone=normalizeYemenPhone(input.value);}catch(err){return toast(err.message);}
-  const button=form.querySelector('[type="submit"]');sending=true;button.disabled=true;
-  try{const result=await sendPdfToWhatsapp(phone,blob,filename,caption);if(form.isConnected&&(result?.submitted===true||result?.openedInWhatsApp===true||result?.status==='submitted'))closeSheet();}
-  catch(err){toast(err.message);}finally{sending=false;button.disabled=false;}
- };
-}
 function bindYemenPhoneInput(input){
  if(!input)return;
  input.oninput=()=>{input.value=latinPhoneDigits(input.value).replace(/\D/g,'').slice(0,9);};
  input.onpaste=e=>{const value=e.clipboardData?.getData('text');if(!value)return;e.preventDefault();try{input.value=normalizeYemenPhone(value).slice(3);}catch(err){toast(err.message);}};
 }
-function showWaSendProgress(message='',{failure=false,details=''}={}){
- const status=$('wa-send-status');if(!status)return;
- status.hidden=!message;if(!message){status.replaceChildren();return;}
- status.style.background=failure?'#702e2e':'#173e30';status.style.textAlign=failure?'right':'center';
- status.style.whiteSpace='pre-line';status.style.maxHeight='45vh';status.style.overflowY='auto';
- status.setAttribute('role',failure?'alert':'status');
- const text=document.createElement('div');text.textContent=message;status.replaceChildren(text);
- if(failure){
-  if(details){const detail=document.createElement('div');detail.textContent=details;detail.style.cssText='margin-top:8px;font-size:12px;opacity:.9';status.append(detail);}
-  const close=document.createElement('button');close.type='button';close.textContent='إغلاق';close.setAttribute('aria-label','إغلاق رسالة الإرسال');
-  close.style.cssText='display:block;margin-top:10px;padding:5px 14px;border:1px solid #ffffff80;border-radius:7px;background:transparent;color:inherit;font:inherit;cursor:pointer';
-  close.onclick=()=>showWaSendProgress();status.append(close);
- }
-}
-async function sendWhatsappPayload(payload){
+async function withWhatsappButton(button,task){
+ if(!button||button.dataset.sending==='true')return;
+ button.dataset.sending='true';button.dataset.sendState='sending';button.disabled=true;button.textContent='⏳ جاري الإرسال...';button.setAttribute('aria-live','polite');
  try{
-  const result=await waSend(payload),message=whatsappSendMessage(result);
-  const completed=result?.openedInWhatsApp===true||result?.submitted===true||['submitted','fallback_opened'].includes(result?.status)||result?.outcome==='submitted';
-  if(completed)showWaSendProgress();else showWaSendProgress(message,{failure:true,details:whatsappSendDetails(result)});
-  toast(message);return result;
+  const result=await task();
+  const accepted=result?.submitted===true&&Number(result.ack)>=1&&Boolean(result.messageId);
+  if(!accepted){const error=Error(whatsappSendMessage(result)||'لم يؤكد واتساب قبول المستند');error.result=result;throw error;}
+  button.dataset.sendState=Number(result.ack)>=2?'delivered':'sent';
+  button.textContent=Number(result.ack)>=2?'✅ تم التسليم للعميل':'✅ تم الإرسال للعميل';
+  button.title=Number(result.ack)>=2?'أكد واتساب وصول المستند إلى جهاز المستلم':'أكد خادم واتساب قبول المستند؛ لم يؤكد وصوله إلى جهاز المستلم بعد';
+  return result;
  }catch(error){
-  // A rejected duplicate tap belongs to no new send and must not replace the
-  // still-running request's progress or its eventual result.
-  if(error?.code!=='wa_send_busy')showWaSendProgress(error?.message||'تعذر تأكيد نتيجة الإرسال',{failure:true,details:whatsappSendDetails(error)});
-  throw error;
- }
+  button.dataset.sendState='error';button.textContent='⚠ '+(error.message||'تعذر الإرسال');button.title=whatsappSendDetails(error.result||error)||error.message||'';
+  return null;
+ }finally{button.dataset.sending='false';button.disabled=false;}
 }
+async function sendEventWhatsapp(event,button,recipientId=''){
+ return withWhatsappButton(button,async()=>{
+  const definition=buildEventDocument(event,state.events,store(),recipientId);normalizeYemenPhone(definition.phone);
+  const document=await makeEventDocument(event,state.events,store(),recipientId);
+  return sendPdfToWhatsapp(document.phone,document.blob,document.filename,document.caption);
+ });
+}
+async function sendWhatsappPayload(payload){return waSend(payload);}
 async function sendPdfToWhatsapp(phone,blob,filename,caption=''){
  const number=fixWhatsappNumber(phone);
  if(!navigator.onLine)throw Error('اتصل بالإنترنت لإرسال المستند');
@@ -395,12 +461,6 @@ async function sendPdfToWhatsapp(phone,blob,filename,caption=''){
  if(arr.length>5000000)throw Error('المستند أكبر من 5 ميجابايت');
  let raw='';for(let i=0;i<arr.length;i+=32768)raw+=String.fromCharCode(...arr.subarray(i,i+32768));
  return sendWhatsappPayload({phone:number,caption,base64:btoa(raw),filename});
-}
-async function shareWhatsapp(phone,text){
- try{
-  const number=fixWhatsappNumber(phone);
-  await sendWhatsappPayload({phone:number,caption:text});
- }catch(e){toast(e.message);}
 }
 
 const waPairing=createWhatsappPairing({session:waSession,getStatus:async()=>{
@@ -523,12 +583,20 @@ function openBackup(){
  $('backup-file').onchange=async e=>{try{if(e.target.files?.[0])await importPortableBackup(await e.target.files[0].text());}catch(err){toast(err.message)}};
 }
 function logout(force=false){if(!force&&!confirm('تسجيل الخروج؟ العمليات المحلية ستبقى على الجهاز.'))return;clearSessionObject();state.session=null;state.events=[];$('app-shell').hidden=true;$('login-screen').hidden=false;closeSheet();}
-function action(id){if(!id)return;if(id==='sales')openInvoice('sale');else if(id==='purchases')openInvoice('purchase');else if(id==='customer')openParty('customer');else if(id==='supplier')openParty('supplier');else if(id==='receipts'||id.startsWith('receipts:'))openMoney('receipt',id.split(':')[1]||'');else if(id==='payments'||id.startsWith('payments:'))openMoney('payment',id.split(':')[1]||'');else if(id==='expenses')openMoney('expense');else if(id==='statements'||id.startsWith('statement:'))openStatement(id.split(':')[1]||'');else if(id==='cashbook')openCashbook();else if(id==='money-services')openMoneyServices();else if(id==='items')openItems();else if(id==='daily-sales')openDailySales();else if(id.startsWith('editparty:'))openParty(getParty(id.split(':')[1])?.type||'customer',id.split(':')[1]);else if(id==='reports'||id==='settings')setScreen(id);else if(id==='whatsapp')openWhatsapp();else if(id==='backup')openBackup();else if(id==='profile')openProfile();else if(id==='logout')logout();}
-async function eventAction(cmd){const [name,id]=cmd.split(':');const e=activeRecords(state.events).find(x=>x.id===id);if(!e)return toast('العملية غير موجودة');if(name==='reverse'){if(!confirm('إلغاء هذه العملية؟ سيتم الاحتفاظ بأثر الإلغاء ولا يمكن حذفه من السجل.'))return;await record('event.reverse',{ref:id,notes:'إلغاء من شاشة الفواتير'});return;}openEvent(id);if(name==='pdf')$('detail-pdf').click();if(name==='share')$('detail-wa').click();}
+function action(id){if(!id)return;if(id==='sales')openInvoice('sale');else if(id==='purchases')openInvoice('purchase');else if(id==='customer')openParty('customer');else if(id==='supplier')openParty('supplier');else if(id==='receipts'||id.startsWith('receipts:'))openMoney('receipt',id.split(':')[1]||'');else if(id==='payments'||id.startsWith('payments:'))openMoney('payment',id.split(':')[1]||'');else if(id==='expenses')openMoney('expense');else if(id==='statements'||id.startsWith('statement:'))openStatement(id.split(':')[1]||'');else if(id==='cashbook')openCashbook();else if(id==='simple-journal')setScreen('journal');else if(id==='money-services')openMoneyServices();else if(id==='items')openItems();else if(id==='daily-sales')openDailySales();else if(id.startsWith('editparty:'))openParty(getParty(id.split(':')[1])?.type||'customer',id.split(':')[1]);else if(id==='reports'||id==='settings')setScreen(id);else if(id==='whatsapp')openWhatsapp();else if(id==='backup')openBackup();else if(id==='profile')openProfile();else if(id==='logout')logout();}
+async function eventAction(cmd,button){
+ const [name,id,recipientId]=cmd.split(':'),event=activeRecords(state.events).find(x=>x.id===id);
+ if(!event)return toast('العملية غير موجودة');
+ if(name==='share')return sendEventWhatsapp(event,button,recipientId||'');
+ if(name==='reverse'){if(!confirm('إلغاء هذه العملية؟ سيتم الاحتفاظ بأثر الإلغاء ولا يمكن حذفه من السجل.'))return;await record('event.reverse',{ref:id,notes:'إلغاء من شاشة الفواتير'});return;}
+ if(name==='pdf'){const document=await makeEventDocument(event,state.events,store());return sharePdf(document.blob,document.filename);}
+ openEvent(id);
+}
 // Delegated handlers keep dynamic views functional after each render.
-document.addEventListener('click',e=>{const nav=e.target.closest('[data-nav]');if(nav){setScreen(nav.dataset.nav);return;}const open=e.target.closest('[data-nav-open]');if(open){setScreen(open.dataset.navOpen);return;}const event=e.target.closest('[data-event]');if(event){eventAction(event.dataset.event).catch(x=>toast(x.message));return;}const btn=e.target.closest('[data-action]');if(btn){action(btn.dataset.action);return;}});
+document.addEventListener('click',e=>{const nav=e.target.closest('[data-nav]');if(nav){setScreen(nav.dataset.nav);return;}const open=e.target.closest('[data-nav-open]');if(open){setScreen(open.dataset.navOpen);return;}const event=e.target.closest('[data-event]');if(event){eventAction(event.dataset.event,event).catch(x=>toast(x.message));return;}const btn=e.target.closest('[data-action]');if(btn){action(btn.dataset.action);return;}});
 $('wa-pill').onclick=()=>state.session&&openWhatsapp();$('notifications-button').onclick=()=>state.session?.mode==='github'?checkSubscription().then(()=>toast('تمت مراجعة حالة الاشتراك')):toast('البيانات محلية. احفظ نسخة احتياطية من قسم الإعدادات.');
-$('close-sheet').onclick=closeSheet;$('sheet-backdrop').onclick=ev=>{if(ev.target===$('sheet-backdrop'))closeSheet();};
+const requestCloseSheet=()=>{const back=$('sheet').qatfahBack;if(back)back();else closeSheet();};
+$('close-sheet').onclick=requestCloseSheet;$('sheet-backdrop').onclick=ev=>{if(ev.target===$('sheet-backdrop'))requestCloseSheet();};
 $('login-form').onsubmit=async ev=>{ev.preventDefault();const f=new FormData(ev.target),button=ev.target.querySelector('button');button.disabled=true;
  try {if(!navigator.onLine)throw Error('أول تسجيل دخول يحتاج إنترنت للتحقق من الاشتراك. بعدها يمكنك العمل دون إنترنت لمدة 7 أيام');
  const user=await authenticate(f.get('username'),f.get('password'));

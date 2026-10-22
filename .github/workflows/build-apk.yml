@@ -10,9 +10,38 @@ on:
 permissions:
   contents: write
 jobs:
+  verification:
+    name: Five complete accounting UI cycles and PDF inspection
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install locked verification dependencies
+        run: |
+          npm ci --no-audit --no-fund
+          python3 -m pip install -r requirements-verification.txt
+          npx playwright install --with-deps chromium
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils fonts-dejavu-core
+      - name: Verify five accounting cycles before building or publishing
+        run: python3 run_5x_system_verification.py --output verification-output
+      - name: Preserve actual test reports and PDFs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qatfah-five-cycle-verification
+          path: verification-output
+          if-no-files-found: error
   android:
     name: Android ${{ matrix.app }} APK
     runs-on: ubuntu-24.04
+    needs: [verification]
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -22,24 +51,23 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
       - uses: android-actions/setup-android@v4
       - name: Install JavaScript dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
       - name: Restore official Qatfah PNG branding
         run: node scripts/restore-assets.mjs
-      - name: Verify accounting and server modules
+      - name: Verify native and application syntax
         run: |
           node --check apps/client/js/app.js
           node --check apps/client/js/ledger.js
           node --check apps/client/js/pdf.js
           node --check native/android/whatsapp-direct.js
           node --check server/index.mjs
-          npm test
       - name: Prepare web assets
         env:
           QATFAH_API_BASE: ${{ vars.QATFAH_API_BASE }}
@@ -155,12 +183,23 @@ jobs:
         with:
           path: release-files
           merge-multiple: true
-      - name: Confirm both APKs and build metadata exist
+      - name: Confirm both APKs and the passing verification evidence exist
         run: |
           test -s release-files/qatfah-client.apk
           test -s release-files/qatfah-admin.apk
           test -s release-files/Qatfah-build-info-client.txt
           test -s release-files/Qatfah-build-info-admin.txt
+          test -s release-files/verification-report.md
+          test -s release-files/source-manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('release-files/verification-report.json').read_text())
+          assert report['requiredAutomationPassed'] is True
+          assert report['sourceUnchangedDuringRun'] is True
+          assert len(report['pdfChecks']) == 45
+          assert all(item['status'] == 'PASS' for item in report['pdfChecks'])
+          PY
       - name: Publish APKs with their actual signing mode
         env:
           GH_TOKEN: ${{ github.token }}
@@ -180,19 +219,22 @@ jobs:
             printf '%s\n' 'Unknown signing mode; refusing to publish.' >&2
             exit 1
           fi
+          printf '%s\n\n' 'Five real Chromium accounting UI cycles and 45 generated PDFs passed. The attached reports preserve the test scope: WhatsApp transport is simulated at the Android boundary, and live recipient delivery remains unverified.' >> release-notes.txt
           cat release-files/Qatfah-build-info-client.txt release-files/Qatfah-build-info-admin.txt >> release-notes.txt
           gh release create "$qatfah_tag" release-files/*.apk release-files/Qatfah-build-info-*.txt \
+            release-files/verification-report.json release-files/verification-report.md release-files/source-manifest.json \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "$qatfah_title" \
             --notes-file release-notes.txt
   web:
+    needs: [verification]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
       - name: Restore official Qatfah PNG branding
         run: node scripts/restore-assets.mjs
       - name: Prepare static websites

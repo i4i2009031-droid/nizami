@@ -1,6 +1,15 @@
 import { test } from 'node:test';import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';
+import {randomUUID} from 'node:crypto';
+import {cashbook,journalAudit} from '../apps/client/js/money-services.js';
+import {statement} from '../apps/client/js/ledger.js';
 const temp=mkdtempSync(join(tmpdir(),'qatfah-test-'));
+const environmentKeys=['NODE_ENV','QATFAH_DATA_DIR','QATFAH_ADMIN_USER','QATFAH_ADMIN_PASSWORD','QATFAH_TOKEN_SECRET','GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','GOOGLE_REDIRECT_URI','QATFAH_GOOGLE_TOKEN_KEY','QATFAH_WHATSAPP_ENABLED','QATFAH_WA_CLOUD_ACCOUNTS'];
+const oldEnvironment=new Map(environmentKeys.map(key=>[key,process.env[key]]));
+// These HTTP cases explicitly exercise unconfigured external integrations.
+// Do not inherit workstation credentials or start an external WhatsApp socket.
+for(const key of ['GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET','GOOGLE_REDIRECT_URI','QATFAH_GOOGLE_TOKEN_KEY','QATFAH_WA_CLOUD_ACCOUNTS'])delete process.env[key];
+process.env.QATFAH_WHATSAPP_ENABLED='false';
 process.env.NODE_ENV='test';process.env.QATFAH_DATA_DIR=temp;process.env.QATFAH_ADMIN_USER='admin';process.env.QATFAH_ADMIN_PASSWORD='test-secure-admin-pass-1234';process.env.QATFAH_TOKEN_SECRET='a'.repeat(64);
 const {createApp}=await import('../server/index.mjs');const server=createApp();await new Promise(done=>server.listen(0,'127.0.0.1',done));const root=`http://127.0.0.1:${server.address().port}`;
 async function api(path,{token,method='GET',body}={}){const r=await fetch(root+path,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});return {status:r.status,...await r.json()};}
@@ -21,7 +30,7 @@ test('private server health, auth, admin, isolated customer sync',async()=>{
  const rev=await api(`/api/admin/users/${a.user.id}`,{token:admin.token,method:'PATCH',body:{active:false}});assert.equal(rev.user.active,false);
  assert.equal((await api('/api/sync/pull?after=0',{token:client.token})).status,401);
 });
-test.after(async()=>{await new Promise(done=>server.close(done));rmSync(temp,{recursive:true,force:true});});
+test.after(async()=>{try{await new Promise(done=>server.close(done));rmSync(temp,{recursive:true,force:true});}finally{for(const [key,value] of oldEnvironment){if(value===undefined)delete process.env[key];else process.env[key]=value;}}});
 test('API validates multi-currency invoices, tenant catalog synchronization, Drive and WhatsApp configuration safely',async()=>{
  const admin=await login('admin','test-secure-admin-pass-1234');
  const created=await api('/api/admin/users',{token:admin.token,method:'POST',body:{username:'merchant_currency',password:'SecurePass300',storeName:'محل العملات',expiresAt:'2028-01-01'}});
@@ -43,4 +52,32 @@ test('API validates multi-currency invoices, tenant catalog synchronization, Dri
  const badCurrency=mk('aaaaaaaa-5555-4555-8555-555555555555','expense.create',{amount:200,currency:'BTC'});
  assert.equal((await api('/api/sync/push',{token,method:'POST',body:{events:[badCurrency]}})).status,422);
  assert.equal((await api('/api/sync/pull?after=0',{token})).events.length,3);
+});
+
+test('API journals and cash movements retain atomic references, precision and isolated balances',async()=>{
+ const admin=await login('admin','test-secure-admin-pass-1234');
+ const created=await api('/api/admin/users',{token:admin.token,method:'POST',body:{username:'merchant_journal',password:'SecurePassJournal300',storeName:'اختبار القيود',expiresAt:'2028-01-01'}});
+ assert.equal(created.status,201);
+ const {token}=await login('merchant_journal','SecurePassJournal300');
+ const mk=(type,payload)=>({id:randomUUID(),type,at:'2026-10-21T14:00:00Z',payload});
+ const first=mk('party.add',{id:'journal-a',name:'أحمد'}),second=mk('party.add',{id:'journal-b',name:'محمد'});
+ const opening=mk('cash.open',{currency:'USD',account:'cash',amount:10.05});
+ const debit=mk('journal.create',{kind:'debit',method:'book',partyId:'journal-a',currency:'USD',amount:5.25});
+ const receipt=mk('journal.create',{kind:'credit',method:'cash',partyId:'journal-a',currency:'USD',amount:1.1});
+ const transfer=mk('journal.create',{kind:'transfer',method:'book',fromPartyId:'journal-a',toPartyId:'journal-b',currency:'USD',amount:2.35});
+ const expense=mk('cash.movement',{direction:'out',category:'expense',currency:'USD',amount:0.8});
+ const events=[first,second,opening,debit,receipt,transfer,expense];
+ assert.equal((await api('/api/sync/push',{token,method:'POST',body:{events}})).status,200);
+ const loaded=(await api('/api/sync/pull?after=0',{token})).events;
+ assert.equal(loaded.length,events.length);assert.equal(journalAudit(loaded).balanced,true);
+ assert.equal(cashbook(loaded,'USD').closing,10.35);
+ assert.equal(statement(loaded,'journal-a','0000-01-01','9999-12-31','USD').closing,1.8);
+ assert.equal(statement(loaded,'journal-b','0000-01-01','9999-12-31','USD').closing,2.35);
+ const invalid=mk('journal.create',{...transfer.payload,toPartyId:'missing'}),unrelated=mk('cash.movement',{direction:'in',currency:'USD',amount:999});
+ assert.equal((await api('/api/sync/push',{token,method:'POST',body:{events:[unrelated,invalid]}})).status,422);
+ assert.equal((await api('/api/sync/pull?after=0',{token})).events.length,events.length);
+ assert.equal((await api('/api/sync/push',{token,method:'POST',body:{events:[{...receipt,id:randomUUID(),payload:{...receipt.payload,amount:1.005}}]}})).status,422);
+ assert.equal((await api('/api/sync/push',{token,method:'POST',body:{events:[{...receipt,payload:{...receipt.payload,amount:99}}]}})).status,422);
+ assert.equal((await api('/api/sync/push',{token,method:'POST',body:{events:[receipt]}})).status,200);
+ assert.equal((await api('/api/sync/pull?after=0',{token})).events.length,events.length);
 });

@@ -1,0 +1,24 @@
+{
+  "package": "@wppconnect/wa-js",
+  "version": "4.7.1",
+  "source": "https://registry.npmjs.org/@wppconnect/wa-js/-/wa-js-4.7.1.tgz",
+  "integrity": "sha512-vcA9q0adL6O9ixRM33wa3geKmYEz+CYP0k1t0rwCAxkp5rjl1YLO3hQOwPRfbTwdgMXC1RtaEl0g625v4In/tw==",
+  "license": "Apache-2.0",
+  "files": {
+    "wppconnect-wa.js": {
+      "sha256": "ed4cc6b17ce18d726b0bd89c0b30021c5b8266f823f13509c08170b7ace96126",
+      "bytes": 548120,
+      "archivePath": "package/dist/wppconnect-wa.js"
+    },
+    "WPP-LICENSE.txt": {
+      "sha256": "dd8188e155a1b5600c909ec40eb22e2b706b8a77111fd2ca56673b22d07e7eae",
+      "bytes": 10759,
+      "archivePath": "package/LICENSE"
+    },
+    "wppconnect-wa.js.LICENSE.txt": {
+      "sha256": "5a2448a164170355f95e2e7c7a88b48c73ec7fe2dd07162d4a201f2b06257525",
+      "bytes": 4198,
+      "archivePath": "package/dist/wppconnect-wa.js.LICENSE.txt"
+    }
+  }
+}
