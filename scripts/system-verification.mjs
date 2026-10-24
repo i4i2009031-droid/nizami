@@ -210,7 +210,29 @@ async function configureIdentity(page,cycle){
  return stored;
 }
 async function addParty(page,{name,phone,type='customer'}){
- await action(page,type==='customer'?'customer':'supplier');await page.locator('#party-form [name="name"]').fill(name);await page.locator('#party-form [name="phone"]').fill(phone);await page.locator('#party-form [type="submit"]').click();await page.locator('#party-form').waitFor({state:'detached'});
+ if(type==='customer'&&name.endsWith('اختبار 1-1')){
+  await home(page);
+  for(const id of ['sales','purchases','customer','supplier','receipts','payments','expenses','statements','money-services','whatsapp','backup','reports','invoices-list','parties-list'])
+   assert.equal(await page.locator('#home-page [data-action="'+id+'"]').count(),1,'home section exists: '+id);
+  await page.locator('#home-service-search').fill('سند قبض');
+  assert.equal(await page.locator('#home-services .app-tile:visible').count(),1,'search filters visible services');
+  await page.locator('#home-service-search').fill('');
+ }
+ await action(page,type==='customer'?'customer':'supplier');
+ if(type==='customer'&&name.endsWith('اختبار 1-1')){
+  await page.evaluate(()=>{window.Capacitor.Plugins.QatfahNative.pickPhoneContact=async()=>({name:'جهة اتصال تجريبية',phone:'+967 777 123 456'});});
+  const before=(await events(page)).length;
+  await page.locator('#party-pick-contact').click();
+  assert.equal(await page.locator('#party-form [name="phone"]').inputValue(),'777123456');
+  assert.equal(await page.locator('#party-form [name="name"]').inputValue(),'جهة اتصال تجريبية');
+  assert.equal((await events(page)).length,before,'contact picker must not write before save');
+  await page.locator('#party-form [name="phone"]').evaluate(input=>{
+   const data=new DataTransfer();data.setData('text','00967 777 123 456');
+   input.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));
+  });
+  assert.equal(await page.locator('#party-form [name="phone"]').inputValue(),'777123456');
+ }
+ await page.locator('#party-form [name="name"]').fill(name);await page.locator('#party-form [name="phone"]').fill(phone);await page.locator('#party-form [type="submit"]').click();await page.locator('#party-form').waitFor({state:'detached'});
  const p=(await events(page)).find(e=>e.type==='party.add'&&e.payload.name===name)?.payload;assert.ok(p);assert.equal(p.phone,'967'+phone);return p;
 }
 async function addItem(page,cycle,index=1){

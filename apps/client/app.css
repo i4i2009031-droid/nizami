@@ -64,3 +64,14 @@
 .cash-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.cash-metric{border-radius:17px;border:1px solid;padding:16px 11px;display:flex;flex-direction:column;gap:10px;min-width:0}.cash-metric small{font-size:11px;line-height:1.9;font-weight:800}.cash-metric b{font:900 20px Arial,Tahoma,sans-serif;overflow-wrap:anywhere;line-height:1.4}.cash-metric span{font-size:10px;opacity:.8;line-height:1.7}.cash-in{background:#eaf8ee;border-color:#cde8d6;color:#17623b}.cash-out{background:#fff0ee;border-color:#f0d4d1;color:#a13b31}.cash-net{background:#eaf3fc;border-color:#c8dcee;color:#174772}.cash-in-text{color:#18703c;font-weight:800}.cash-out-text{color:#a8302c;font-weight:800}.cash-report-send{margin-top:16px}.report-recipient{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 0}.cash-report-send .btn{width:100%}#cash-movement-form{margin-top:15px}#cashbook-table td{vertical-align:top;white-space:normal}#cashbook-table td:nth-child(3){min-width:140px}#cashbook-table td:nth-child(4),#cashbook-table td:nth-child(5){white-space:nowrap}
 [data-send-state="sending"]{opacity:.75;cursor:wait}[data-send-state="sent"],[data-send-state="delivered"]{background:#e1f4e9!important;color:#176442!important}[data-send-state="error"]{background:#fff1ee!important;color:#9c3428!important;white-space:normal;line-height:1.9;text-align:right;overflow-wrap:anywhere}
 @media(max-width:440px){.cash-summary{grid-template-columns:1fr 1fr}.cash-net{grid-column:1/-1}.cash-net b{font-size:26px}.report-recipient{grid-template-columns:1fr}.bottom-nav button{font-size:9px}.journal-kind-options{gap:5px}.journal-kind small{font-size:9px}.foot-actions{flex-wrap:wrap}.foot-actions .btn{min-width:42%}}
+
+/* Contact picker, responsive directory, and extra space above the fixed bottom bar. */
+.contact-picker-btn{width:100%;display:flex;align-items:center;justify-content:center;min-height:43px;border:1px solid #cde2de;border-radius:13px;background:#edf8f5;color:#086d5c;font-size:12px;font-weight:900;padding:10px 12px}
+.contact-picker-btn:disabled{opacity:.65;cursor:wait}
+.contact-picker-hint{display:block;font-size:11px;color:#6a7787;line-height:1.8;margin-top:-7px}
+.home-service-search{margin:18px 0 2px}
+.home-service-search label{margin-bottom:7px}
+.home-service-search input{width:100%;background:#fff}
+.app-tile b{white-space:normal;overflow-wrap:anywhere;text-align:center;line-height:1.5}
+.main-content{padding-bottom:calc(112px + env(safe-area-inset-bottom,0px))}
+@media (min-width:680px){.main-content{padding-bottom:calc(112px + env(safe-area-inset-bottom,0px))}}
