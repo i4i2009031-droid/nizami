@@ -258,4 +258,5 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./site
           publish_branch: gh-pages
+          cname: qatfah.qodynex.tech
           keep_files: true # Preserve /mahwor static web on subsequent Qatfah deployments
