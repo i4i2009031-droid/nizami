@@ -60,7 +60,7 @@
       "id": "969ca429-3701-4cd4-8102-b894237e7139",
       "username": "Mama",
       "expiresAt": "2027-11-23",
-      "active": false,
+      "active": true,
       "salt": "7bc7823a2874285e1bd99019bfdc32cb",
       "rounds": 240000,
       "passwordHash": "4ad2099feae1a9c5c57b62c5fde6dab64ef8ead7cf74d275cb2989569ad4942b"
