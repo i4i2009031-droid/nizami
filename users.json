@@ -37,6 +37,15 @@
       "salt": "f0bc0fcf790a0db6c44fbf0ca943d6fb",
       "rounds": 240000,
       "passwordHash": "bfa8d2e7294b5951f367f2765a17780992b2729ee7703fd8b0128b932a268016"
+    },
+    {
+      "id": "e93d779f-63f9-4e6c-a56f-25e8f492fca2",
+      "username": "Ali123",
+      "expiresAt": "2070-11-23",
+      "active": true,
+      "salt": "720832d1f106939e0550c26ad37b6d17",
+      "rounds": 240000,
+      "passwordHash": "e495bac927f23b10c862a3c2c76cb51d31d93cf7836ec1e935200a5f0e6043e9"
     }
   ]
 }
