@@ -70,9 +70,9 @@
       "username": "Aliali",
       "expiresAt": "2027-01-20",
       "active": true,
-      "salt": "43c6d0cc0367f972227495cb84ed3aad",
+      "salt": "7a1d8015d74493f531f148ed9b2381c5",
       "rounds": 240000,
-      "passwordHash": "f89b9d4c9c0815b04756788ff769d83e29bbb63123a403640a48b5e39f94a495"
+      "passwordHash": "2e29f5bf5d50fbd6bac17097d67e5320325fc900ca0546d1f5e4ee94e94bc711"
     }
   ]
 }
