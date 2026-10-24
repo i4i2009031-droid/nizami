@@ -7,9 +7,9 @@
       "username": "ali",
       "expiresAt": "2026-11-19",
       "active": true,
-      "salt": "5f3349d35e8c6585563e069cb522efc7",
+      "salt": "815663c562bb1f9710cb0119fe3c14a2",
       "rounds": 240000,
-      "passwordHash": "6d09ffdb5fe26c25335ee14c89ed7d01d5bd854dd452e5780363e665e0e69e87"
+      "passwordHash": "475e679bf8e0ec99b8849e5d7df0fe1ccaac2d313233e4bf652f8cd10316e30a"
     },
     {
       "id": "4543db8f-86fd-4ea7-a8ba-637f0a2e1f49",
