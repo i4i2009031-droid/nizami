@@ -64,6 +64,15 @@
       "salt": "7bc7823a2874285e1bd99019bfdc32cb",
       "rounds": 240000,
       "passwordHash": "4ad2099feae1a9c5c57b62c5fde6dab64ef8ead7cf74d275cb2989569ad4942b"
+    },
+    {
+      "id": "f04bfdb3-489b-4fb7-8abf-1b3e502f377e",
+      "username": "Aliali",
+      "expiresAt": "2027-01-20",
+      "active": true,
+      "salt": "43c6d0cc0367f972227495cb84ed3aad",
+      "rounds": 240000,
+      "passwordHash": "f89b9d4c9c0815b04756788ff769d83e29bbb63123a403640a48b5e39f94a495"
     }
   ]
 }
