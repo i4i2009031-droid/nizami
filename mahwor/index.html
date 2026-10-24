@@ -1,0 +1,67 @@
+<!doctype html><html lang="ar" dir="rtl"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=5,viewport-fit=cover"/>
+<meta name="theme-color" content="#e7f4ff"/><meta name="description" content="محور الحسابات: محاسبة ومبيعات للأعمال" />
+<link rel="icon" href="./assets/icon-192.png"/><link rel="manifest" href="./manifest.webmanifest"/>
+<link rel="stylesheet" href="./app.css"/><link rel="stylesheet" href="./mahwor.css"/><title>محور الحسابات | محاسبة ومبيعات</title>
+</head><body>
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="wa-engine-root" data-engine="android-native" data-linked="false"></div>
+<section id="login-screen" class="login-screen">
+ <div class="login-card">
+  <img class="login-logo" src="./assets/mahwor-logo.webp" alt="محور الحسابات" />
+  <span class="kicker">نظام محاسبة التجار</span><h1>مرحبًا في محور الحسابات</h1>
+  <p class="muted">فواتيرك، حساباتك، وتقاريرك... في مكان واحد</p>
+  <form id="login-form" class="stacked">
+    <label>اسم المستخدم <input name="username" autocomplete="username" placeholder="اسم المستخدم" required /></label>
+    <label>كلمة المرور <input name="password" type="password" autocomplete="current-password" placeholder="••••••••" required /></label>
+    <button type="submit" class="btn btn-primary">تسجيل الدخول <span>←</span></button>
+  </form>
+  <p class="muted" style="font-size:10px;line-height:1.9;margin:9px 0 0">الاتصال الافتراضي عبر GitHub للتجربة. للاشتراكات التجارية الآمنة يُوصى بخادم تحقق مستقل.</p>
+  <details id="license-connect-panel" class="license-setup">
+    <summary>إعداد الاتصال بالاشتراكات <span aria-hidden="true">⚙</span></summary>
+    <p>اختياري عند توفر خادم اشتراكات HTTPS. بدون خادم، يتحقق التطبيق من ملف قطفة العام على GitHub (وضع تجريبي أقل حماية). لا تضع توكن GitHub هنا أو داخل التطبيق.</p>
+    <form id="license-connect-form" class="stacked">
+      <label>رابط خدمة الاشتراكات الآمنة
+        <input id="license-server-url" name="licenseServerURL" type="url" inputmode="url" dir="ltr" placeholder="https://api.example.com" autocomplete="off" />
+      </label>
+      <button class="btn btn-light btn-block" type="submit">حفظ عنوان الخادم</button>
+    </form>
+  </details>
+ </div>
+</section>
+<div id="app-shell" class="app-shell" hidden>
+ <header class="app-header">
+  <div class="status-strip">
+    <span id="live-time" class="clock">--:--</span>
+    <div class="status-pills">
+      <span id="server-pill" class="status-pill"><i class="pulse"></i> محلي</span>
+      <button id="wa-pill" class="status-pill" type="button"><i class="pulse wa"></i> واتساب غير مرتبط</button>
+    </div>
+  </div>
+  <div class="head-brand">
+    <div class="mahwor-head-actions">
+      <button id="notifications-button" type="button" aria-label="فحص المزامنة" title="فحص الاشتراك"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4"/></svg></button>
+      <button type="button" data-action="quick-search" aria-label="البحث السريع"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16 16 5 5"/></svg></button>
+    </div>
+    <div class="mahwor-brand"><img src="./assets/mahwor-logo.webp" alt="محور الحسابات - محاسبة ومبيعات" /></div>
+    <button type="button" data-action="profile" class="mahwor-profile" title="ملف المستخدم">
+      <span class="mahwor-profile-photo"><img id="store-logo" src="./assets/icon-192.png" alt="شعار المنشأة" /></span>
+      <small class="hi">أهلا بك</small><strong id="store-name">المستخدم</strong><small id="store-subtitle">نظام الحسابات</small>
+    </button>
+  </div>
+ </header>
+ <main class="main-content">
+   <section id="home-page" class="page"></section>
+   <section id="content-page" class="page" hidden></section>
+ </main>
+ <nav class="bottom-nav" aria-label="التنقل الرئيسي">
+   <button data-nav="invoices" type="button"><span><svg viewBox="0 0 24 24"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h4"/></svg></span>الفواتير</button>
+   <button data-nav="journal" type="button"><span><svg viewBox="0 0 24 24"><path d="M5 3h14v18H5zM8 9h8M8 13h8M8 17h5"/></svg></span>القيود</button>
+   <button data-nav="home" type="button" class="active"><span><svg viewBox="0 0 24 24"><path d="m3 11 9-8 9 8v9H3zM9 20v-7h6v7"/></svg></span>الرئيسية</button>
+   <button data-nav="parties" type="button"><span><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6m2 3a6 6 0 0 1 3 6"/></svg></span>الحسابات</button>
+   <button data-nav="reports" type="button"><span><svg viewBox="0 0 24 24"><path d="M3 21h18M7 17V9h3v8m3 0V3h3v14m3 0v-6h3v6"/></svg></span>التقارير</button>
+ </nav>
+</div>
+<div id="sheet-backdrop" class="sheet-backdrop" hidden><section id="sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title"><div class="sheet-head"><button id="close-sheet" class="close-btn" type="button">×</button><h2 id="sheet-title"></h2><span class="sheet-grab"></span></div><div id="sheet-body" class="sheet-body"></div></section></div>
+<script type="module" src="./js/app.js"></script>
+</body></html>
