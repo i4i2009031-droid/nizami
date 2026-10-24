@@ -42,7 +42,7 @@
       "id": "e93d779f-63f9-4e6c-a56f-25e8f492fca2",
       "username": "Ali123",
       "expiresAt": "2070-11-23",
-      "active": false,
+      "active": true,
       "salt": "e76a58e45592d1952d409ed9e48135eb",
       "rounds": 240000,
       "passwordHash": "12164c5779119af43184e6e2d526959aee2f0043f9406c98371031a97bf1a5a6"
