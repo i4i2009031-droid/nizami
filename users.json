@@ -52,9 +52,9 @@
       "username": "ABC",
       "expiresAt": "2027-11-23",
       "active": true,
-      "salt": "dddf894f0c8bf9172bd3ee1963bbe3fb",
+      "salt": "a80d0c065010bc1c4992cd1fd7fc0686",
       "rounds": 240000,
-      "passwordHash": "9ebdd8de717c5a22e6feea5d8a57f6e4e0ec080c2101797cb2636a9872f86d2e"
+      "passwordHash": "91bc55fcd3105bdee6198aa74805984c140670ca8543daab5b538cafe6b85d08"
     }
   ]
 }
