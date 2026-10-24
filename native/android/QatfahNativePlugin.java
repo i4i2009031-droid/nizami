@@ -3,6 +3,8 @@ package com.qatfah.accounting;
 import android.app.Activity;
 import android.content.Intent;
 import android.net.Uri;
+import android.provider.ContactsContract;
+import android.database.Cursor;
 import android.util.Base64;
 import androidx.activity.result.ActivityResult;
 import com.getcapacitor.Plugin;
@@ -57,6 +59,32 @@ public class QatfahNativePlugin extends Plugin {
     call.reject("الربط داخل قطفة متاح بالباركود أو رمز الهاتف فقط");
   }
 
+  /** Android's contact picker grants access only to a single selected phone row. */
+  @PluginMethod public void pickPhoneContact(PluginCall call) {
+    if(getActivity()==null){call.reject("شاشة التطبيق غير متاحة");return;}
+    try {
+      Intent picker=new Intent(Intent.ACTION_PICK,ContactsContract.CommonDataKinds.Phone.CONTENT_URI);
+      startActivityForResult(call,picker,"pickPhoneContactResult");
+    }catch(Exception ex){call.reject("تعذر فتح جهات الاتصال على الجهاز",ex);}
+  }
+  @ActivityCallback private void pickPhoneContactResult(PluginCall call,ActivityResult result) {
+    if(call==null)return;
+    if(result.getResultCode()!=Activity.RESULT_OK||result.getData()==null||result.getData().getData()==null){
+      JSObject cancelled=new JSObject();cancelled.put("cancelled",true);call.resolve(cancelled);return;
+    }
+    Uri uri=result.getData().getData();
+    if(!"content".equalsIgnoreCase(uri.getScheme())){call.reject("جهة الاتصال المختارة غير صالحة");return;}
+    String[] projection={ContactsContract.CommonDataKinds.Phone.NUMBER,ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME};
+    try(Cursor cursor=getContext().getContentResolver().query(uri,projection,null,null,null)){
+      if(cursor==null||!cursor.moveToFirst()){call.reject("لم يتم العثور على رقم لجهة الاتصال");return;}
+      int phoneCol=cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER);
+      int nameCol=cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME);
+      String phone=phoneCol>=0?cursor.getString(phoneCol):"";
+      String name=nameCol>=0?cursor.getString(nameCol):"";
+      if(phone==null||phone.trim().isEmpty()){call.reject("جهة الاتصال لا تحتوي على رقم هاتف");return;}
+      JSObject selected=new JSObject();selected.put("phone",phone);selected.put("name",name==null?"":name);call.resolve(selected);
+    }catch(Exception ex){call.reject("تعذر قراءة الرقم المختار من جهات الاتصال",ex);}
+  }
   private boolean validWhatsAppPayload(PluginCall call) {
     String phone=call.getString("phone","");
     String caption=call.getString("caption","");
